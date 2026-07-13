@@ -65,6 +65,8 @@ struct BrainDumpSheet: View {
                     tasks: tasks,
                     currentIndex: $cardIndex,
                     duplicateOf: duplicateOf,
+                    speech: speech,
+                    voiceEnabled: !textMode,
                     onKeep: { save($0, tasks: tasks) },
                     onDiscard: { advance(tasks: tasks) },
                     onDone: { onComplete() }
@@ -593,6 +595,8 @@ struct CardReviewView: View {
     let tasks: [ParsedTask]
     @Binding var currentIndex: Int
     var duplicateOf: [String: String] = [:]
+    @ObservedObject var speech: SpeechManager
+    var voiceEnabled: Bool = false
     let onKeep: (ParsedTask) -> Void
     let onDiscard: () -> Void
     let onDone: () -> Void
@@ -601,6 +605,7 @@ struct CardReviewView: View {
     @State private var rot: Double = 0
     @State private var showEditSheet = false
     @State private var editedTitle = ""
+    @State private var editedSteps: [String] = []
     @State private var editedCurrentTask: ParsedTask? = nil
 
     private var current: ParsedTask { editedCurrentTask ?? tasks[currentIndex] }
@@ -665,31 +670,73 @@ struct CardReviewView: View {
             Spacer()
 
             HStack(spacing: 32) {
-                circleButton(icon: "xmark", color: Color.bdRed)    { animateOut(.left) }
-                circleButton(icon: "pencil", color: Color.bdMuted)  {
+                labeledButton(icon: "xmark", label: "Decline", color: Color.bdRed) { animateOut(.left) }
+                labeledButton(icon: "pencil", label: "Edit", color: Color.bdMuted) {
                     editedTitle = current.title
+                    editedSteps = current.microSteps
                     showEditSheet = true
                 }
-                circleButton(icon: "checkmark", color: Color.bdGreen) { animateOut(.right) }
+                labeledButton(icon: "checkmark", label: "Accept", color: Color.bdGreen) { animateOut(.right) }
             }
-            .padding(.bottom, 48)
+            .padding(.bottom, voiceEnabled ? 8 : 40)
+
+            if voiceEnabled {
+                Text("Or say \"accept\", \"decline\", or \"edit\"")
+                    .font(.bdMicro()).foregroundStyle(Color.bdMuted2)
+                    .padding(.bottom, 28)
+            }
         }
         .sheet(isPresented: $showEditSheet) {
-            EditTaskSheet(title: $editedTitle) { newTitle in
+            EditTaskSheet(title: $editedTitle, steps: $editedSteps) {
+                let cleanedSteps = editedSteps
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
                 editedCurrentTask = ParsedTask(
-                    title: newTitle,
+                    title: editedTitle.trimmingCharacters(in: .whitespacesAndNewlines),
                     category: current.category,
                     relativeTime: current.relativeTime,
                     urgency: current.urgency,
-                    microSteps: current.microSteps,
+                    microSteps: cleanedSteps,
                     originalQuote: current.originalQuote
                 )
                 showEditSheet = false
             }
-            .presentationDetents([.medium])
+            .presentationDetents([.large])
+            .onDisappear { armVoice() }
         }
         .onChange(of: currentIndex) { _, _ in
             editedCurrentTask = nil  // reset edits when card advances
+            armVoice()               // re-arm the mic for the next card
+        }
+        .onAppear { armVoice() }
+        .onDisappear { if voiceEnabled { speech.stopRecording() } }
+    }
+
+    // Hands-free review: listen for a spoken command per card and map it to the same actions
+    // as the buttons. Gated to device (voiceEnabled) so the simulator stays touch-only.
+    private func armVoice() {
+        guard voiceEnabled, !showEditSheet else { return }
+        speech.onSilenceDetected = { handleVoice(speech.transcript) }
+        try? speech.startRecording()
+    }
+
+    private func handleVoice(_ text: String) {
+        let t = text.lowercased()
+        func has(_ words: [String]) -> Bool { words.contains { t.contains($0) } }
+        if has(["accept", "keep", "yes", "save", "add it", "sounds good", "confirm"]) {
+            onKeep(current)                              // saves + advances; onChange re-arms
+        } else if has(["decline", "skip", "discard", "reject", "next", "nope", "no thanks"]) {
+            onDiscard()                                  // advances; onChange re-arms
+        } else if has(["edit", "change it"]) {
+            speech.stopRecording()
+            editedTitle = current.title
+            editedSteps = current.microSteps
+            showEditSheet = true
+        } else if has(["done", "finish", "that's all", "thats all", "i'm done", "im done", "stop"]) {
+            speech.stopRecording()
+            onDone()
+        } else {
+            DispatchQueue.main.async { armVoice() }      // no command recognized, listen again
         }
     }
 
@@ -698,7 +745,7 @@ struct CardReviewView: View {
         if drag.width > 30 {
             RoundedRectangle(cornerRadius: 24).strokeBorder(Color.bdGreen, lineWidth: 2.5)
                 .overlay(alignment: .topLeading) {
-                    Text("KEEP")
+                    Text("ACCEPT")
                         .font(.system(size: 24, weight: .black)).foregroundStyle(Color.bdGreen)
                         .rotationEffect(.degrees(-14)).padding(24)
                         .opacity(min(1, drag.width / 80))
@@ -706,11 +753,18 @@ struct CardReviewView: View {
         } else if drag.width < -30 {
             RoundedRectangle(cornerRadius: 24).strokeBorder(Color.bdRed, lineWidth: 2.5)
                 .overlay(alignment: .topTrailing) {
-                    Text("SKIP")
+                    Text("DECLINE")
                         .font(.system(size: 24, weight: .black)).foregroundStyle(Color.bdRed)
                         .rotationEffect(.degrees(14)).padding(24)
                         .opacity(min(1, abs(drag.width) / 80))
                 }
+        }
+    }
+
+    private func labeledButton(icon: String, label: String, color: Color, action: @escaping () -> Void) -> some View {
+        VStack(spacing: 8) {
+            circleButton(icon: icon, color: color, action: action)
+            Text(label).font(.bdCaption()).foregroundStyle(color)
         }
     }
 
@@ -741,28 +795,62 @@ struct CardReviewView: View {
 
 private struct EditTaskSheet: View {
     @Binding var title: String
-    let onSave: (String) -> Void
-    @FocusState private var focused: Bool
+    @Binding var steps: [String]
+    let onSave: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
+        VStack(alignment: .leading, spacing: 16) {
             Text("Edit Task")
                 .font(.bdBody()).foregroundStyle(Color.bdMuted)
                 .padding(.top, 24).padding(.horizontal, 24)
 
-            TextField("Task title", text: $title, axis: .vertical)
-                .font(.system(size: 20, weight: .semibold))
-                .foregroundStyle(.white)
-                .padding(16)
-                .background(Color.bdCard2)
-                .clipShape(RoundedRectangle(cornerRadius: 14))
-                .padding(.horizontal, 20)
-                .focused($focused)
-                .lineLimit(3...6)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("TITLE").font(.bdMicro()).foregroundStyle(Color.bdMuted)
+                        TextField("Task title", text: $title, axis: .vertical)
+                            .font(.system(size: 20, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .padding(16)
+                            .background(Color.bdCard2)
+                            .clipShape(RoundedRectangle(cornerRadius: 14))
+                            .lineLimit(2...4)
+                    }
 
-            Button {
-                onSave(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? title : title)
-            } label: {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("MICRO-STEPS").font(.bdMicro()).foregroundStyle(Color.bdMuted)
+                        ForEach(steps.indices, id: \.self) { i in
+                            HStack(spacing: 10) {
+                                TextField("Step \(i + 1)", text: $steps[i], axis: .vertical)
+                                    .font(.bdBody()).foregroundStyle(.white)
+                                    .padding(12)
+                                    .background(Color.bdCard2)
+                                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                                    .lineLimit(1...3)
+                                Button {
+                                    steps.remove(at: i)
+                                } label: {
+                                    Image(systemName: "minus.circle.fill")
+                                        .font(.system(size: 20)).foregroundStyle(Color.bdRed)
+                                }
+                            }
+                        }
+                        Button {
+                            steps.append("")
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "plus.circle.fill").font(.system(size: 16))
+                                Text("Add step").font(.bdCaption())
+                            }
+                            .foregroundStyle(Color.bdPrimary)
+                        }
+                        .padding(.top, 2)
+                    }
+                }
+                .padding(.horizontal, 24)
+            }
+
+            Button(action: onSave) {
                 Text("Save")
                     .font(.bdBody())
                     .frame(maxWidth: .infinity)
@@ -771,13 +859,10 @@ private struct EditTaskSheet: View {
                     .foregroundStyle(.white)
                     .clipShape(RoundedRectangle(cornerRadius: 14))
             }
-            .padding(.horizontal, 20)
+            .padding(.horizontal, 20).padding(.bottom, 12)
             .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-
-            Spacer()
         }
         .background(Color.bdBg.ignoresSafeArea())
-        .onAppear { focused = true }
     }
 }
 

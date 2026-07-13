@@ -6,7 +6,6 @@ struct TaskFocusView: View {
     @Environment(\.dismiss) private var dismiss
     @Query private var allTasks: [TaskItem]
 
-    @State private var dragOffset: CGFloat = 0
     @State private var showToast = false
     @State private var toastText = ""
 
@@ -35,7 +34,6 @@ struct TaskFocusView: View {
 
     @ViewBuilder
     private func mainContent(_ task: TaskItem) -> some View {
-        let step = task.firstIncompleteStep
         let done = task.completedMicroStepCount
         let total = task.microSteps.count
 
@@ -71,35 +69,33 @@ struct TaskFocusView: View {
 
             Spacer().frame(height: 40)
 
-            if let step {
-                // Next step card
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("NEXT STEP")
-                        .font(.bdMicro()).foregroundStyle(Color.bdMuted)
-                        .padding(.horizontal, 24)
-
-                    stepCard(step: step)
-                        .padding(.horizontal, 24)
-                        .offset(x: dragOffset)
-                        .gesture(
-                            DragGesture()
-                                .onChanged { v in
-                                    if v.translation.width > 0 { dragOffset = v.translation.width }
-                                }
-                                .onEnded { v in
-                                    if v.translation.width > 90 {
-                                        completeStep(step, task: task)
-                                    }
-                                    withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
-                                        dragOffset = 0
-                                    }
-                                }
-                        )
+            // Full checklist: show every micro-step at once so the whole plan is visible.
+            // Tap any step to check it off (no more one-at-a-time reveal).
+            if total > 0 {
+                Text("STEPS")
+                    .font(.bdMicro()).foregroundStyle(Color.bdMuted)
+                    .padding(.horizontal, 24).padding(.bottom, 10)
+                ScrollView {
+                    VStack(spacing: 10) {
+                        ForEach(task.microSteps.sorted { $0.order < $1.order }, id: \.persistentModelID) { s in
+                            stepRow(step: s, task: task)
+                        }
+                    }
+                    .padding(.horizontal, 24)
                 }
-            } else if !task.isCompleted {
-                allStepsDoneCard(task).padding(.horizontal, 24)
-            } else {
+                if task.isCompleted {
+                    completedBadge(task: task).padding(.horizontal, 24).padding(.vertical, 12)
+                } else if task.microSteps.allSatisfy(\.isCompleted) {
+                    allStepsDoneCard(task).padding(.horizontal, 24).padding(.vertical, 12)
+                }
+            } else if task.isCompleted {
+                Spacer()
                 completedBadge(task: task).padding(.horizontal, 24)
+                Spacer()
+            } else {
+                Spacer()
+                allStepsDoneCard(task).padding(.horizontal, 24)
+                Spacer()
             }
 
             Spacer()
@@ -114,48 +110,38 @@ struct TaskFocusView: View {
                             .animation(.spring(response: 0.3), value: done)
                     }
                 }
-                .padding(.horizontal, 24).padding(.bottom, 12)
-            }
-
-            if step != nil {
-                Text("Swipe right or tap to complete step")
+                .padding(.horizontal, 24).padding(.bottom, 10)
+                Text("Tap a step to check it off")
                     .font(.bdMicro()).foregroundStyle(Color.bdMuted2)
                     .frame(maxWidth: .infinity)
-                    .padding(.bottom, 44)
+                    .padding(.bottom, 36)
             }
         }
     }
 
-    private func stepCard(step: MicroStep) -> some View {
-        let progress = min(1.0, dragOffset / 90.0)
-        return Button {
-            if let t = task { completeStep(step, task: t) }
+    private func stepRow(step: MicroStep, task: TaskItem) -> some View {
+        Button {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            step.isCompleted.toggle()
+            // Keep the parent task's completion in sync with its steps.
+            task.isCompleted = task.microSteps.allSatisfy(\.isCompleted)
+            if task.isCompleted { UINotificationFeedbackGenerator().notificationOccurred(.success) }
         } label: {
-            HStack(spacing: 14) {
-                ZStack {
-                    Circle()
-                        .fill(Color.bdPrimary.opacity(0.15 + 0.25 * progress))
-                        .frame(width: 40, height: 40)
-                    Image(systemName: progress > 0.85 ? "checkmark" : "arrow.right")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(Color.bdPrimary)
-                }
+            HStack(alignment: .top, spacing: 14) {
+                Image(systemName: step.isCompleted ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 20))
+                    .foregroundStyle(step.isCompleted ? Color.bdGreen : Color.bdMuted)
                 Text(step.text)
-                    .font(.bdBody()).foregroundStyle(.white)
+                    .font(.bdBody())
+                    .foregroundStyle(step.isCompleted ? Color.bdMuted : .white)
+                    .strikethrough(step.isCompleted, color: Color.bdMuted)
                     .fixedSize(horizontal: false, vertical: true)
                     .multilineTextAlignment(.leading)
                 Spacer()
             }
-            .padding(18)
-            .background(
-                RoundedRectangle(cornerRadius: 16)
-                    .fill(Color.bdCard)
-                    .shadow(color: Color.bdPrimary.opacity(0.12 * progress), radius: 20, x: 0, y: 0)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 16)
-                    .strokeBorder(Color.bdPrimary.opacity(0.2 + 0.4 * progress), lineWidth: 1)
-            )
+            .padding(16)
+            .background(RoundedRectangle(cornerRadius: 14).fill(Color.bdCard))
+            .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color.bdBorder, lineWidth: 1))
         }
         .buttonStyle(.plain)
     }
@@ -210,16 +196,6 @@ struct TaskFocusView: View {
             .buttonStyle(.plain)
         }
         .frame(maxWidth: .infinity)
-    }
-
-    private func completeStep(_ step: MicroStep, task: TaskItem) {
-        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-        step.isCompleted = true
-        showFeedback("Step done!")
-        if task.microSteps.allSatisfy(\.isCompleted) {
-            task.isCompleted = true
-            UINotificationFeedbackGenerator().notificationOccurred(.success)
-        }
     }
 
     private func showFeedback(_ text: String) {
