@@ -172,7 +172,7 @@ final class AIParsingManager: ObservableObject {
     /// the OPPOSITES rule) yet the model still fails this every time, so we enforce the flip
     /// deterministically. Deliberately narrow to explicit un-completion phrasings so it only
     /// ever fires on a real "reopen this" request the model misread as "complete this".
-    static func negatesCompletion(_ transcript: String) -> Bool {
+    nonisolated static func negatesCompletion(_ transcript: String) -> Bool {
         let t = transcript.lowercased()
         let markers = ["not done", "as not done", "not complete", "not finished",
                        "as undone", "un-complete", "uncomplete", "incomplete", "not marked done"]
@@ -182,9 +182,76 @@ final class AIParsingManager: ObservableObject {
     /// True when the utterance leads with an unambiguous delete verb. Used to stop the model's
     /// occasional "clear ... -> complete_all" flip, which is the opposite (and wrong) action.
     /// None of these verbs ever legitimately mean "complete", so this only corrects mistakes.
-    static func leadsWithDeleteVerb(_ transcript: String) -> Bool {
+    nonisolated static func leadsWithDeleteVerb(_ transcript: String) -> Bool {
         let t = transcript.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         return ["clear ", "wipe ", "trash ", "delete ", "remove ", "nuke ", "get rid"].contains { t.hasPrefix($0) }
+    }
+
+    /// True only when the user means the ENTIRE list, never a specific task. Gates the destructive
+    /// delete_all intent. It matches the EXACT object of the command (after stripping the leading
+    /// delete verb), so a named delete like "delete the all-hands meeting task" can never trip it
+    /// just because the task NAME contains "all"/"the list"/"my tasks". A false negative here is
+    /// safe (it demotes to a named delete, which no-ops); a false positive would wipe everything.
+    nonisolated static func mentionsEntireList(_ transcript: String) -> Bool {
+        let full = transcript.lowercased()
+            .trimmingCharacters(in: CharacterSet(charactersIn: " \t\n.!?,"))
+        // Whole-utterance "start over" style intents (no task named).
+        let intents: Set<String> = ["start over", "start fresh", "start from scratch", "clean slate",
+                                     "reset", "clear the board", "clear the lot", "wipe the slate", "scrap it all"]
+        if intents.contains(full) { return true }
+        // Strip a leading delete/clear verb, then judge the OBJECT of the command.
+        var obj = full
+        for verb in ["delete all of ", "clear out ", "get rid of ", "delete ", "clear ", "wipe ",
+                     "trash ", "remove ", "nuke ", "erase "] where obj.hasPrefix(verb) {
+            obj = String(obj.dropFirst(verb.count)).trimmingCharacters(in: .whitespaces)
+            break
+        }
+        if obj.hasSuffix(" please") { obj = String(obj.dropLast(7)).trimmingCharacters(in: .whitespaces) }
+        // EXACT global-quantifier objects. An exact match cannot collide with a "the <name> task"
+        // delete, whose object always carries the specific name (e.g. "the all-hands meeting task").
+        let wholeList: Set<String> = [
+            "all", "all tasks", "all my tasks", "all the tasks", "all of them", "all of it",
+            "all of my tasks", "all of the tasks", "them", "them all", "all of these", "it all",
+            "everything", "every task", "every single task", "every single one", "everything on the list",
+            "the whole list", "the entire list", "my whole list", "my entire list",
+            "the whole thing", "the entire thing", "the list", "my list", "the tasks", "my tasks"
+        ]
+        // Exact match only. No prefix allowance: "delete every overdue task" / "delete everything
+        // bagel" (a task named that) are SCOPED or named deletes, not the whole list, so they must
+        // demote to a named delete (safe no-op) rather than wipe everything.
+        return wholeList.contains(obj)
+    }
+
+    /// Apply the deterministic destructive-safety guards to the raw model intent. Pure and
+    /// unit-tested (VoxdumpDestructiveGuardTests): these correct the model's worst mistakes,
+    /// where it takes the opposite or an over-broad destructive action.
+    nonisolated static func guardedIntent(_ rawIntent: String, transcript: String) -> String {
+        var intent = rawIntent
+        // Negation: "mark X as not done" is a reopen, never a completion.
+        if negatesCompletion(transcript) {
+            if intent == "complete_all" { intent = "reactivate_all" }
+            else if intent == "complete_named" { intent = "reactivate_named" }
+        }
+        // Destructive-clear: a leading clear/wipe/trash/delete/remove/nuke is a delete, not a
+        // completion; "... the done/completed tasks" scopes to completed only.
+        if leadsWithDeleteVerb(transcript) {
+            let t = transcript.lowercased()
+            let scopedToCompleted = ["done task", "done one", "completed", "finished"].contains { t.contains($0) }
+            if scopedToCompleted, intent == "complete_all" || intent == "delete_all" {
+                intent = "delete_completed"
+            } else if intent == "complete_all" {
+                intent = "delete_all"
+            } else if intent == "complete_named" {
+                intent = "delete_named"
+            }
+        }
+        // Destructive-scope: NEVER wipe the whole list unless the user actually said so. A delete
+        // that names a specific subject stays a single named delete, so "remove the nicobar island
+        // task" can never nuke a dozen unrelated tasks (the 2026-07-13 data-loss regression).
+        if intent == "delete_all", !mentionsEntireList(transcript) {
+            intent = "delete_named"
+        }
+        return intent
     }
 
     /// A reminder is schedulable only if it names a real clock time (a digit, or a time-of-day
@@ -213,28 +280,9 @@ final class AIParsingManager: ObservableObject {
         // RELEASE: redact user speech + task hints so they never persist in a shipped device's logs.
         BDLog.parsing.notice("FM parse — intent=\(parsed.intent, privacy: .public) namedHint=\(parsed.namedTaskHint, privacy: .private) reminderTime=\(parsed.reminderTime, privacy: .private) tasks=\(parsed.tasks.count, privacy: .public) transcript=\(transcript, privacy: .private)")
         #endif
-        // Negation guard (see negatesCompletion): flip a misread completion to the reopen it
-        // actually was. Only fires on explicit "not done"/"un-complete" phrasings.
-        var intent = parsed.intent
-        if Self.negatesCompletion(transcript) {
-            if intent == "complete_all" { intent = "reactivate_all" }
-            else if intent == "complete_named" { intent = "reactivate_named" }
-        }
-        // Destructive-clear guard: "clear/wipe/trash/delete/remove/nuke ..." is a delete, never a
-        // completion. And "... the done/completed/finished tasks" scopes to completed tasks only.
-        // The prompt teaches this, but the model still intermittently flips these to complete_all
-        // or over-reaches to delete_all, so pin the destructive intent down deterministically.
-        if Self.leadsWithDeleteVerb(transcript) {
-            let t = transcript.lowercased()
-            let scopedToCompleted = ["done task", "done one", "completed", "finished"].contains { t.contains($0) }
-            if scopedToCompleted, intent == "complete_all" || intent == "delete_all" {
-                intent = "delete_completed"
-            } else if intent == "complete_all" {
-                intent = "delete_all"
-            } else if intent == "complete_named" {
-                intent = "delete_named"
-            }
-        }
+        // Deterministic destructive-safety guards (negation, destructive-clear, and the
+        // never-wipe-the-whole-list scope guard) all live in guardedIntent: pure + unit-tested.
+        let intent = Self.guardedIntent(parsed.intent, transcript: transcript)
         switch intent {
         case "complete_all":        return ParsedDump(tasks: [], command: .completeAll)
         case "complete_named":
@@ -245,8 +293,10 @@ final class AIParsingManager: ObservableObject {
         case "complete_n":       return ParsedDump(tasks: [], command: .completeN(max(1, parsed.commandCount)))
         case "delete_all":       return ParsedDump(tasks: [], command: .deleteAll)
         case "delete_named":
+            // A named delete with no resolvable subject must do NOTHING. It must NEVER fall back
+            // to deleteAll (that once wiped a full list when the model dropped the subject of
+            // "remove the X task"). Empty hint -> deleteNamed("") which no-ops in executeCommand.
             let hint = parsed.namedTaskHint.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !hint.isEmpty else { return ParsedDump(tasks: [], command: .deleteAll) }
             return ParsedDump(tasks: [], command: .deleteNamed(hint))
         case "delete_completed": return ParsedDump(tasks: [], command: .deleteCompleted)
         case "reactivate_named":

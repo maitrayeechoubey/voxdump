@@ -253,21 +253,29 @@ struct BrainDumpSheet: View {
             dismiss()
 
         case .deleteNamed(let hint):
+            let cleanHint = hint.trimmingCharacters(in: .whitespacesAndNewlines)
+            // Never mass-delete: an unresolved named delete leaves everything untouched.
+            guard !cleanHint.isEmpty else {
+                BDLog.command.notice("deleteNamed empty hint -> no-op (never deletes all)")
+                speak("I wasn't sure which task you meant, so I didn't delete anything.")
+                dismiss()
+                return
+            }
             let descriptor = FetchDescriptor<TaskItem>(
                 sortBy: [SortDescriptor(\TaskItem.createdAt, order: .reverse)]
             )
             if let tasks = try? modelContext.fetch(descriptor) {
-                let match = TaskMatcher.bestMatchIndex(hint: hint, titles: tasks.map { $0.title }).map { tasks[$0] }
+                let match = TaskMatcher.bestMatchIndex(hint: cleanHint, titles: tasks.map { $0.title }).map { tasks[$0] }
                 #if DEBUG
-                BDLog.command.notice("deleteNamed hint=\(hint, privacy: .public) match=\(match?.title ?? "nil", privacy: .public) candidates=\(tasks.count, privacy: .public)")
+                BDLog.command.notice("deleteNamed hint=\(cleanHint, privacy: .public) match=\(match?.title ?? "nil", privacy: .public) candidates=\(tasks.count, privacy: .public)")
                 #else
-                BDLog.command.notice("deleteNamed hint=\(hint, privacy: .private) match=\(match?.title ?? "nil", privacy: .private) candidates=\(tasks.count, privacy: .public)")
+                BDLog.command.notice("deleteNamed hint=\(cleanHint, privacy: .private) match=\(match?.title ?? "nil", privacy: .private) candidates=\(tasks.count, privacy: .public)")
                 #endif
                 if let task = match {
                     modelContext.delete(task)
                     UINotificationFeedbackGenerator().notificationOccurred(.warning)
                 } else {
-                    speak("I couldn't find a task matching \(hint). Tap the task in your list to delete it.")
+                    speak("I couldn't find a task matching \(cleanHint). Tap the task in your list to delete it.")
                 }
             }
             dismiss()
