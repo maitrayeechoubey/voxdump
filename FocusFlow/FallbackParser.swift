@@ -223,7 +223,11 @@ enum FallbackParser {
         let reminderTriggers = ["remind me", "set a reminder", "set reminder",
                                 "alert me", "notify me", "create a reminder"]
         if reminderTriggers.contains(where: { lower.contains($0) }) {
+            #if DEBUG
             BDLog.reminder.debug("Reminder trigger matched in: \"\(lower, privacy: .public)\"")
+            #else
+            BDLog.reminder.debug("Reminder trigger matched in: \"\(lower, privacy: .private)\"")
+            #endif
             guard let rawTime = extractTimePhrase(from: lower) else {
                 BDLog.reminder.debug("No time phrase found — treating as a task, not a reminder")
                 return nil   // no time → let it be parsed as a task (never a bogus reminder)
@@ -255,11 +259,19 @@ enum FallbackParser {
                     break
                 }
             }
+            #if DEBUG
             BDLog.reminder.debug("Reminder extracted — hint: \"\(taskHint ?? "nil", privacy: .public)\", rawTime: \"\(rawTime, privacy: .public)\"")
+            #else
+            BDLog.reminder.debug("Reminder extracted — hint: \"\(taskHint ?? "nil", privacy: .private)\", rawTime: \"\(rawTime, privacy: .private)\"")
+            #endif
             return .scheduleReminder(taskHint: taskHint, rawTime: rawTime)
         }
 
+        #if DEBUG
         BDLog.parsing.debug("FallbackParser: no command matched in: \"\(lower, privacy: .public)\"")
+        #else
+        BDLog.parsing.debug("FallbackParser: no command matched in: \"\(lower, privacy: .private)\"")
+        #endif
         return nil
     }
 

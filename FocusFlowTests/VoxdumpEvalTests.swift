@@ -988,6 +988,52 @@ final class VoxdumpAIParsingEvalTests: XCTestCase {
                 "Without a specific time, 'call the plumber' should become a task")
         }
     }
+
+    // MARK: - S48/S49: named commands by PARTIAL name must resolve to an EXISTING task
+    // Regression guard for the "reopen submit immigration paperwork" bug: the FM must classify
+    // these as a *_named command (never task_creation), and TaskMatcher must resolve the hint to
+    // the seeded task, so a duplicate task is never created. Combines FM classification + matcher,
+    // the gap that let the original bug through (matcher tests and FM tests never ran together).
+
+    private func assertNamedResolves(
+        _ transcript: String, titles: [String], expectIdx: Int, kind: String,
+        file: StaticString = #file, line: UInt = #line
+    ) async throws {
+        let r = try await parse(transcript)
+        XCTAssertTrue(r.tasks.isEmpty,
+            "\(transcript): expected a \(kind) command, but it created tasks \(r.tasks.map(\.title))",
+            file: file, line: line)
+        guard let command = r.command else {
+            return XCTFail("\(transcript): expected .\(kind)Named, got no command", file: file, line: line)
+        }
+        let hint: String?
+        switch command {
+        case .reactivateNamed(let h) where kind == "reactivate": hint = h
+        case .completeNamed(let h) where kind == "complete": hint = h
+        case .deleteNamed(let h) where kind == "delete": hint = h
+        default: hint = nil
+        }
+        guard let hint else {
+            return XCTFail("\(transcript): expected .\(kind)Named, got \(String(describing: command))", file: file, line: line)
+        }
+        let idx = TaskMatcher.bestMatchIndex(hint: hint, titles: titles)
+        XCTAssertEqual(idx, expectIdx,
+            "\(transcript): hint \"\(hint)\" resolved to \(idx.map { titles[$0] } ?? "nil"), expected \"\(titles[expectIdx])\"",
+            file: file, line: line)
+    }
+
+    func test_S48_reopenByPartialName_resolvesToExistingTask() async throws {
+        let titles = ["Submit immigration paperwork", "Call the dentist", "Pay the electric bill"]
+        try await assertNamedResolves("reactivate submit immigration task", titles: titles, expectIdx: 0, kind: "reactivate")
+        try await assertNamedResolves("reopen the immigration paperwork task", titles: titles, expectIdx: 0, kind: "reactivate")
+        try await assertNamedResolves("reopen my submit immigration paperwork task", titles: titles, expectIdx: 0, kind: "reactivate")
+    }
+
+    func test_S49_completeAndDeleteByPartialName_resolveToExistingTask() async throws {
+        let titles = ["Submit immigration paperwork", "Call the dentist", "Pay the electric bill"]
+        try await assertNamedResolves("mark the immigration paperwork task as done", titles: titles, expectIdx: 0, kind: "complete")
+        try await assertNamedResolves("delete the electric bill task", titles: titles, expectIdx: 2, kind: "delete")
+    }
 }
 
 // MARK: - VoxdumpTaskMatcherTests

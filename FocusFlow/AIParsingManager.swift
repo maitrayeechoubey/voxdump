@@ -64,34 +64,40 @@ final class AIParsingManager: ObservableObject {
     enum ParsingMode { case unknown, foundationModels, fallback }
 
     private let instructions = """
-    You are an intent classifier and task extractor for an ADHD voice app. Choose exactly ONE intent, then (only for task_creation) extract tasks.
+    You are an intent classifier and task extractor for an ADHD voice app. FIRST pick exactly ONE intent. THEN, only for task_creation, extract every task.
 
     INTENTS:
-    - task_creation: NEW things the user still needs to do. Default when unsure — but NEVER for viewing/listing existing tasks, and NEVER for a past-tense "already did it".
-    - show_tasks: wants to SEE the list on screen: show/open/"pull up"/list/"list them all"/"list out"/"what are my tasks"/"what tasks do I have"/"what's on my list"/"what's on my plate"/"what do I have". The verb "list" and "what tasks…/what's on…" ALWAYS mean show_tasks, even right after mentioning creating tasks ("I asked you to create some tasks, now list them all" → show_tasks). Prefer show_tasks when unsure show vs read.
+    - task_creation: NEW things the user still needs to do. Default when unsure. NEVER for viewing/listing existing tasks, and NEVER for a past-tense "already did it".
+    - show_tasks: wants to SEE the list on screen: show/open/"pull up"/list/"list them all"/"list out"/"what are my tasks"/"what tasks do I have"/"what's on my list"/"what's on my plate"/"what do I have". The verb "list" and "what tasks.../what's on..." ALWAYS mean show_tasks, even right after mentioning creating tasks ("I asked you to create some tasks, now list them all" -> show_tasks). Prefer show_tasks when unsure show vs read. A real task plus a view clause ("add call mom and show my list") extracts only the real task(s); a view request with no real task is show_tasks.
     - read_today / read_pending / read_all: read aloud. today: "what's due today", "what do I have today". pending: "what's left", "what's still pending". all: "read everything", "read them back", "give me a rundown".
     - complete_all: mark ALL pending done ("mark all done", "I finished everything").
-    - complete_and_clear: mark ALL done AND wipe the list.
-    - complete_n: complete a specific count ("done with 3", "I finished two", "knock out the top three").
-    - complete_named: ONE existing task is finished — INCLUDING plain past-tense with NO command ("just finished the laundry", "wrapped up the presentation", "the report is done", "I already paid rent", "I called Xfinity, mark it done"). Short subject → namedTaskHint.
-    - reactivate_named: REOPEN / un-complete ONE task ("reopen the grocery task", "open the X task again", "bring it back", "I didn't actually finish the report", "mark X as not done"). Always an EXISTING done task, never a new one. Short subject → namedTaskHint.
-    - reactivate_all: reopen / un-complete ALL ("reopen all", "mark all as not done", "undo all of them", "bring them all back"). OPPOSITE of complete_all; never complete_all or delete_all here.
-    - delete_all: wipe the WHOLE list ("delete all", "clear everything", "wipe my list"). Only for an explicit all/everything.
-    - delete_named: delete ONE named task ("delete the Xfinity task", "clear the milk task"). "clear the [X] task" is ALWAYS this (an existing task X), never a new task, even if X sounds like an item to buy. Description → namedTaskHint.
-    - delete_completed: remove ONLY completed tasks ("clear the finished ones", "clear the completed ones", "remove the done ones"). Never delete_all.
-    - schedule_reminder: a timed reminder WITH a specific time the user ACTUALLY said ("at 3pm", "in 30 minutes", "tomorrow morning", "ping me at 3"). Put that exact time in reminderTime, the subject in reminderTaskHint. NEVER invent a time — if the message has no time, it is task_creation. More than one thing to do → task_creation (extract all, even if one has a time).
+    - complete_and_clear: mark ALL done AND wipe the list ("mark all done and clear").
+    - complete_n: complete a specific COUNT ("done with 3", "I finished two", "knock out the top three"). Put the number in commandCount.
+    - complete_named: ONE existing task is finished, INCLUDING plain past-tense with NO command word ("just finished the laundry", "wrapped up the presentation", "the report is done", "I already paid rent", "spoke to my boss, cross that off", "I called Xfinity, mark it done"). "cross it off"/"cross that off"/"check that off" about a past action is complete_named. Short subject -> namedTaskHint.
+    - reactivate_named: REOPEN / un-complete ONE already-done task ("reopen the grocery task", "open the X task again", "bring it back", "oops I marked it done by mistake, bring it back", "I didn't actually finish the report"). ALWAYS an existing done task, never a new one. Short subject -> namedTaskHint.
+    - reactivate_all: reopen / un-complete ALL done tasks ("reopen all", "reopen all the done tasks", "undo all of them", "bring them all back"). OPPOSITE of complete_all; never route it to complete_all or delete_all. namedTaskHint empty.
+    - delete_all: wipe the WHOLE list. Any of clear/delete/wipe/remove/trash/nuke applied to everything: "delete all", "clear all tasks", "clear all", "clear all the tasks", "clear everything", "clear my tasks", "wipe my list", "start fresh".
+    - delete_named: delete ONE named task ("delete the Xfinity task", "trash the gym task", "clear the milk task"). "clear/delete/remove/trash the [X] task" is ALWAYS this existing task X, never a new task, even if X sounds like an item to buy. Subject -> namedTaskHint.
+    - delete_completed: remove ONLY the completed tasks ("clear the finished ones", "clear the completed ones", "clear the done ones", "clear all the done tasks", "remove the done ones").
+    - schedule_reminder: a timed reminder WITH a time the user ACTUALLY said ("at 3pm", "in 30 minutes", "tomorrow morning", "ping me at 3"). Put that exact time in reminderTime, the subject in reminderTaskHint. NEVER invent a time: if the message has no real time, it is task_creation. If the user mentions MORE THAN ONE thing to do, even if one says "remind me" with a time, it is task_creation (extract them ALL as tasks).
 
-    RULES:
-    - VIEW ≠ CREATE: any request to see/show/list/"list out"/"pull up"/open/read/"read back"/"tell me"/"what tasks…/what's on…/what do I have" about existing tasks is show_tasks or read_*, NEVER task_creation. Never fabricate a task named "list"/"show my list"/"my tasks".
-    - PAST vs FUTURE: past-tense done ("finished/wrapped up/paid/called/…is done") → complete_named. Future/imperative ("I need to…", "call Xfinity", "remind me to…") → task_creation.
-    - REOPEN is the opposite of complete: reopen/"open…again"/un-complete/"not done"/"bring back"/undo/"didn't finish" → reactivate_named (one) or reactivate_all (all), never complete_* or delete_*. A verb inside the task name ("reopen create demo app task" → reactivate_named "demo app") is part of the name, not a new task. Bare "open my list" (no "again") → show_tasks.
-    - DESTRUCTIVE guard: delete_all ONLY for an explicit all/everything. Never send "undo"/"bring back"/"clear the finished/completed ones" to delete_all (→ reactivate_all or delete_completed).
-    - namedTaskHint = short subject only (1–4 words, no command verb, no "task"/"as done", never the intent name). Good: "xfinity", "grocery shopping", "rent".
+    DISAMBIGUATION (read carefully):
+    - CLEAR/TRASH/WIPE = REMOVE, never complete. The verbs clear, delete, wipe, remove, trash, "get rid of", nuke ALWAYS mean a delete intent, NEVER complete_all or complete_named. "clear all the done tasks" / "clear the completed ones" -> delete_completed. "clear all tasks" / "clear everything" -> delete_all. "clear the [X] task" -> delete_named.
+    - VIEW is not CREATE: any request to see/show/list/"list out"/"pull up"/open/read/"read back"/"tell me"/"what tasks.../what's on..."/"what do I have" about existing tasks is show_tasks or read_*, NEVER task_creation. Never fabricate a task named "list"/"show my list"/"my tasks".
+    - PAST is not FUTURE: past-tense done ("finished/wrapped up/paid/called/...is done") -> complete_named. Future or imperative ("I need to...", "call Xfinity", "remind me to...") -> task_creation.
+    - OPPOSITES, reopen is the opposite of complete: reopen, "open ... again", un-complete, uncomplete, "not done", "as not done", "mark as not done", "didn't finish", "bring back", undo all set an ALREADY-DONE task back to pending. One target -> reactivate_named; all -> reactivate_all. NEVER complete_* or delete_* for these. Watch the word "not": "mark the dentist task as not done" -> reactivate_named "dentist"; "mark all tasks as not done" -> reactivate_all. A verb inside the task name ("reopen create demo app task" -> reactivate_named "demo app") is part of the name. Bare "open my list" (no "again") -> show_tasks.
+    - namedTaskHint = short subject only (1 to 4 words, no command verb, no "task"/"as done", never the intent name). Good: "xfinity", "grocery shopping", "rent".
 
-    TASK EXTRACTION (task_creation only): one entry per distinct action. Title verb-first ≤8 words; category PERSONAL/WORK/HOME/FINANCE/HEALTH/ERRANDS; relativeTime today/tonight/tomorrow_morning/tomorrow/this_week or empty; urgency high/medium/low; 2–4 verb-first micro-steps; originalQuote from the transcript.
-    - Count actions, not sentences. "and"/commas/"also" separate items: "buy milk and call the dentist" → 2 (Buy milk; Call the dentist); "X, Y, and Z" → 3. Never merge or drop.
-    - Compound with a view clause ("add call mom and show my list") → extract only the real task(s); never a task named "show my list"/"list them all". No real task + a view request → show_tasks.
-    - Dedup identical titles. Trailing closers ("that's it", "done", "all done") are end-of-speech, not tasks — but keep them mid-sentence ("call AT&T to cancel"). On self-correction ("actually", "no wait", "scratch that", "instead", "I meant") keep ONLY the final version ("buy milk, scratch that, almond milk" → Buy almond milk).
+    TASK EXTRACTION (task_creation only):
+    FIRST silently COUNT how many distinct things the user needs to do. THEN output EXACTLY that many task entries, one per distinct action. Never merge two actions into one entry, never hide one as a micro-step of another, and never truncate the list. If you count 3, output 3; if you count 4, output 4. The connecting words do not matter, only the number of distinct actions: "and", commas, "also", "plus", "then" all separate items. "call the dentist and pay rent and buy groceries" -> 3. "X, Y, and Z" -> 3. "pay the electric bill and also pick up dry cleaning" -> 2. Infer the intended verb from terse or mis-transcribed speech instead of dropping it: "by milk and eggs" (ASR for buy) -> Buy milk, Buy eggs; "call the bank" -> Call the bank. Output zero tasks ONLY when there is genuinely no actionable content (pure filler like "um, never mind").
+    For EACH task set:
+    - title: action-verb-first, max 8 words ("Call the dentist", "Pay electric bill").
+    - category: exactly one of PERSONAL, WORK, HOME, FINANCE, HEALTH, ERRANDS.
+    - relativeTime: today/tonight/tomorrow_morning/tomorrow/this_week, or empty if none.
+    - urgency: high/medium/low.
+    - microSteps: 2 to 4 concrete, immediately actionable steps, each starting with a verb. For "Call the dentist": "Look up the dentist's number", "Call to book a cleaning", "Add the appointment to my calendar".
+    - originalQuote: the exact phrase from the transcript that triggered this task.
+    Dedup identical titles. Trailing closers ("that's it", "done", "all done") at the END are end-of-speech, not tasks, but keep them mid-sentence ("call AT&T to cancel"). On self-correction ("actually", "no wait", "scratch that", "instead", "I meant", "change it to") keep ONLY the final version ("buy milk, scratch that, almond milk" -> Buy almond milk).
     """
 
     func parse(transcript: String) async throws -> ParsedDump {
@@ -161,6 +167,26 @@ final class AIParsingManager: ObservableObject {
         return phrases.contains { t.contains($0) }
     }
 
+    /// The on-device model reliably drops the "not" in "mark X as not done" and returns a
+    /// completion, the exact opposite of the ask. The prompt teaches the correct mapping (see
+    /// the OPPOSITES rule) yet the model still fails this every time, so we enforce the flip
+    /// deterministically. Deliberately narrow to explicit un-completion phrasings so it only
+    /// ever fires on a real "reopen this" request the model misread as "complete this".
+    static func negatesCompletion(_ transcript: String) -> Bool {
+        let t = transcript.lowercased()
+        let markers = ["not done", "as not done", "not complete", "not finished",
+                       "as undone", "un-complete", "uncomplete", "incomplete", "not marked done"]
+        return markers.contains { t.contains($0) }
+    }
+
+    /// True when the utterance leads with an unambiguous delete verb. Used to stop the model's
+    /// occasional "clear ... -> complete_all" flip, which is the opposite (and wrong) action.
+    /// None of these verbs ever legitimately mean "complete", so this only corrects mistakes.
+    static func leadsWithDeleteVerb(_ transcript: String) -> Bool {
+        let t = transcript.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        return ["clear ", "wipe ", "trash ", "delete ", "remove ", "nuke ", "get rid"].contains { t.hasPrefix($0) }
+    }
+
     #if canImport(FoundationModels)
     @available(iOS 26, macOS 26, *)
     private func parseWithFoundationModels(_ transcript: String) async throws -> ParsedDump {
@@ -170,8 +196,36 @@ final class AIParsingManager: ObservableObject {
             generating: FFParsedDump.self
         )
         let parsed = response.content
+        #if DEBUG
+        // DEBUG builds keep content .public so on-device logarchive QA still works.
         BDLog.parsing.notice("FM parse — intent=\(parsed.intent, privacy: .public) namedHint=\(parsed.namedTaskHint, privacy: .public) reminderTime=\(parsed.reminderTime, privacy: .public) tasks=\(parsed.tasks.count, privacy: .public) transcript=\(transcript, privacy: .public)")
-        switch parsed.intent {
+        #else
+        // RELEASE: redact user speech + task hints so they never persist in a shipped device's logs.
+        BDLog.parsing.notice("FM parse — intent=\(parsed.intent, privacy: .public) namedHint=\(parsed.namedTaskHint, privacy: .private) reminderTime=\(parsed.reminderTime, privacy: .private) tasks=\(parsed.tasks.count, privacy: .public) transcript=\(transcript, privacy: .private)")
+        #endif
+        // Negation guard (see negatesCompletion): flip a misread completion to the reopen it
+        // actually was. Only fires on explicit "not done"/"un-complete" phrasings.
+        var intent = parsed.intent
+        if Self.negatesCompletion(transcript) {
+            if intent == "complete_all" { intent = "reactivate_all" }
+            else if intent == "complete_named" { intent = "reactivate_named" }
+        }
+        // Destructive-clear guard: "clear/wipe/trash/delete/remove/nuke ..." is a delete, never a
+        // completion. And "... the done/completed/finished tasks" scopes to completed tasks only.
+        // The prompt teaches this, but the model still intermittently flips these to complete_all
+        // or over-reaches to delete_all, so pin the destructive intent down deterministically.
+        if Self.leadsWithDeleteVerb(transcript) {
+            let t = transcript.lowercased()
+            let scopedToCompleted = ["done task", "done one", "completed", "finished"].contains { t.contains($0) }
+            if scopedToCompleted, intent == "complete_all" || intent == "delete_all" {
+                intent = "delete_completed"
+            } else if intent == "complete_all" {
+                intent = "delete_all"
+            } else if intent == "complete_named" {
+                intent = "delete_named"
+            }
+        }
+        switch intent {
         case "complete_all":        return ParsedDump(tasks: [], command: .completeAll)
         case "complete_named":
             let hint = parsed.namedTaskHint.trimmingCharacters(in: .whitespacesAndNewlines)

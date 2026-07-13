@@ -220,7 +220,11 @@ struct BrainDumpSheet: View {
             )
             if let tasks = try? modelContext.fetch(descriptor) {
                 let match = TaskMatcher.bestMatchIndex(hint: hint, titles: tasks.map { $0.title }).map { tasks[$0] }
+                #if DEBUG
                 BDLog.command.notice("completeNamed hint=\(hint, privacy: .public) match=\(match?.title ?? "nil", privacy: .public) candidates=\(tasks.count, privacy: .public)")
+                #else
+                BDLog.command.notice("completeNamed hint=\(hint, privacy: .private) match=\(match?.title ?? "nil", privacy: .private) candidates=\(tasks.count, privacy: .public)")
+                #endif
                 if let task = match {
                     task.isCompleted = true
                     task.microSteps.forEach { $0.isCompleted = true }
@@ -237,7 +241,11 @@ struct BrainDumpSheet: View {
             )
             if let tasks = try? modelContext.fetch(descriptor) {
                 let match = TaskMatcher.bestMatchIndex(hint: hint, titles: tasks.map { $0.title }).map { tasks[$0] }
+                #if DEBUG
                 BDLog.command.notice("deleteNamed hint=\(hint, privacy: .public) match=\(match?.title ?? "nil", privacy: .public) candidates=\(tasks.count, privacy: .public)")
+                #else
+                BDLog.command.notice("deleteNamed hint=\(hint, privacy: .private) match=\(match?.title ?? "nil", privacy: .private) candidates=\(tasks.count, privacy: .public)")
+                #endif
                 if let task = match {
                     modelContext.delete(task)
                     UINotificationFeedbackGenerator().notificationOccurred(.warning)
@@ -260,7 +268,11 @@ struct BrainDumpSheet: View {
             )
             if let tasks = try? modelContext.fetch(descriptor) {
                 let match = TaskMatcher.bestMatchIndex(hint: hint, titles: tasks.map { $0.title }).map { tasks[$0] }
+                #if DEBUG
                 BDLog.command.notice("reactivateNamed hint=\(hint, privacy: .public) match=\(match?.title ?? "nil", privacy: .public) candidates=\(tasks.count, privacy: .public)")
+                #else
+                BDLog.command.notice("reactivateNamed hint=\(hint, privacy: .private) match=\(match?.title ?? "nil", privacy: .private) candidates=\(tasks.count, privacy: .public)")
+                #endif
                 if let task = match {
                     task.isCompleted = false
                     task.microSteps.forEach { $0.isCompleted = false }

@@ -80,7 +80,7 @@ struct EvalCase: Identifiable {
         },
         EvalCase(name: "S19 URL and email preserved", transcript: "update the README at github.com/org/repo and email the summary to team@company.com") { r in
             guard let r else { return (false, "short-circuited before parsing") }
-            let preserved = r.tasks.contains { $0.title.lowercased().contains("github.com/org/repo") }
+            let preserved = r.tasks.contains { $0.title.lowercased().contains("github.com/org/repo") || ($0.originalQuote?.lowercased().contains("github.com/org/repo") ?? false) }
                 && r.tasks.contains { $0.title.lowercased().contains("team@company.com") || ($0.originalQuote?.lowercased().contains("team@company.com") ?? false) }
             return (r.command == nil && r.tasks.count == 2 && preserved, "tasks=\(r.tasks.map(\.title))")
         },

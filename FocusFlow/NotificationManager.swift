@@ -15,7 +15,11 @@ final class NotificationManager {
     }
 
     func schedule(title: String, body: String, at date: Date) {
+        #if DEBUG
         BDLog.reminder.info("Scheduling notification '\(body, privacy: .public)' at \(date, privacy: .public)")
+        #else
+        BDLog.reminder.info("Scheduling notification '\(body, privacy: .private)' at \(date, privacy: .public)")
+        #endif
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
@@ -97,7 +101,11 @@ final class NotificationManager {
                                   tomorrow: lower.contains("tomorrow"), cal: cal, now: now)
         }
 
+        #if DEBUG
         BDLog.reminder.warning("parseTime failed for: \"\(text, privacy: .public)\"")
+        #else
+        BDLog.reminder.warning("parseTime failed for: \"\(text, privacy: .private)\"")
+        #endif
         return nil
     }
 
