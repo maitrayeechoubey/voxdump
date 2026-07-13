@@ -610,6 +610,9 @@ struct CardReviewView: View {
     // Tracks whether we intend the review mic to be live, so a delayed (re)arm
     // never fires after the card advanced or the sheet was dismissed.
     @State private var voiceActive = false
+    // Set while an action is being applied so a trailing transcript update can't
+    // fire the same command twice before the card re-arms.
+    @State private var actionInFlight = false
     // Let the audio session settle after the previous stopRecording() before we
     // reactivate it. Starting the engine immediately after deactivation throws
     // intermittently and used to leave the mic silently dead (try? swallowed it).
@@ -702,36 +705,31 @@ struct CardReviewView: View {
             }
         }
         .sheet(isPresented: $showEditSheet) {
-            EditTaskSheet(title: $editedTitle, steps: $editedSteps) {
-                let cleanedSteps = editedSteps
-                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                    .filter { !$0.isEmpty }
-                editedCurrentTask = ParsedTask(
-                    title: editedTitle.trimmingCharacters(in: .whitespacesAndNewlines),
-                    category: current.category,
-                    relativeTime: current.relativeTime,
-                    urgency: current.urgency,
-                    microSteps: cleanedSteps,
-                    originalQuote: current.originalQuote
-                )
-                showEditSheet = false
-            }
-            .presentationDetents([.large])
-            .onDisappear { armVoice() }
+            EditTaskSheet(title: $editedTitle, steps: $editedSteps, voiceEnabled: voiceEnabled, onSave: commitEdit)
+                .presentationDetents([.large])
         }
         .onChange(of: currentIndex) { _, _ in
             editedCurrentTask = nil  // reset edits when card advances
             armVoice()               // re-arm the mic for the next card
         }
+        // Entering/leaving the edit sheet re-arms so the matcher switches between
+        // review commands (accept/decline/edit) and edit commands (save/cancel).
+        .onChange(of: showEditSheet) { _, _ in armVoice() }
+        // Match commands the instant the recognizer produces them instead of waiting
+        // out the full silence timeout (that ~3.5s lag read as "not responding").
+        .onChange(of: speech.transcript) { _, txt in evaluate(txt, live: true) }
         .onAppear { armVoice() }
         .onDisappear { if voiceEnabled { stopVoice() } }
     }
 
-    // Hands-free review: listen for a spoken command per card and map it to the same actions
-    // as the buttons. Gated to device (voiceEnabled) so the simulator stays touch-only.
+    // Hands-free review: keep a mic live per card and map spoken commands to the same
+    // actions as the buttons. Gated to device (voiceEnabled) so the simulator stays
+    // touch-only. The matcher is context-aware: review commands on the card, save/cancel
+    // while the edit sheet is open.
     private func armVoice() {
-        guard voiceEnabled, !showEditSheet else { return }
+        guard voiceEnabled else { return }
         voiceActive = true
+        actionInFlight = false
         // Fully tear down any prior session first, then arm after a short settle
         // (see reArmDelay) so the audio session has time to reactivate cleanly.
         speech.stopRecording()
@@ -740,13 +738,12 @@ struct CardReviewView: View {
 
     private func scheduleArm(attempt: Int) {
         DispatchQueue.main.asyncAfter(deadline: .now() + reArmDelay) {
-            // Bail if the card advanced, the edit sheet opened, or we left review
-            // during the settle window — otherwise we'd revive the mic on a dead card.
-            guard voiceActive, voiceEnabled, !showEditSheet else { return }
-            speech.onSilenceDetected = { handleVoice(speech.transcript) }
+            // Bail if we left review during the settle window, else we'd revive a dead mic.
+            guard voiceActive, voiceEnabled else { return }
+            speech.onSilenceDetected = { evaluate(speech.transcript, live: false) }
             do {
                 try speech.startRecording()
-                BDLog.speech.log("review: mic armed (card \(currentIndex), attempt \(attempt))")
+                BDLog.speech.log("review: mic armed (card \(currentIndex), editing \(showEditSheet), attempt \(attempt))")
             } catch {
                 BDLog.speech.error("review: mic arm failed (card \(currentIndex), attempt \(attempt)): \(error.localizedDescription, privacy: .public)")
                 // Retry a couple of times; a transient session bounce usually clears.
@@ -760,24 +757,60 @@ struct CardReviewView: View {
         speech.stopRecording()
     }
 
-    private func handleVoice(_ text: String) {
-        let t = text.lowercased()
-        func has(_ words: [String]) -> Bool { words.contains { t.contains($0) } }
-        if has(["accept", "keep", "yes", "save", "add it", "sounds good", "confirm"]) {
-            onKeep(current)                              // saves + advances; onChange re-arms
-        } else if has(["decline", "skip", "discard", "reject", "next", "nope", "no thanks"]) {
-            onDiscard()                                  // advances; onChange re-arms
-        } else if has(["edit", "change it"]) {
-            speech.stopRecording()
+    // Evaluate a (possibly partial) transcript. `live` = a transcript update fired, so
+    // act immediately; otherwise the silence fallback fired, so re-arm on no match.
+    private func evaluate(_ text: String, live: Bool) {
+        guard voiceActive, !actionInFlight else { return }
+        guard let action = ReviewCommandMatcher.match(text, editing: showEditSheet) else {
+            if !live { logHeard(text, action: nil); armVoice() }
+            return
+        }
+        logHeard(text, action: action)
+        perform(action)
+    }
+
+    private func perform(_ action: ReviewCommand) {
+        actionInFlight = true
+        speech.stopRecording()                // cancel the recognizer so nothing double-fires
+        switch action {
+        case .accept:  onKeep(current)         // saves + advances; onChange re-arms next card
+        case .decline: onDiscard()             // advances; onChange re-arms
+        case .edit:
             editedTitle = current.title
             editedSteps = current.microSteps
-            showEditSheet = true
-        } else if has(["done", "finish", "that's all", "thats all", "i'm done", "im done", "stop"]) {
-            stopVoice()
-            onDone()
-        } else {
-            DispatchQueue.main.async { armVoice() }      // no command recognized, listen again
+            showEditSheet = true               // onChange(showEditSheet) arms edit-mode voice
+        case .save:    commitEdit()            // closes the sheet; onChange re-arms review
+        case .cancel:  showEditSheet = false   // discard edits; onChange re-arms review
+        case .done:    stopVoice(); onDone()
         }
+    }
+
+    // Build the edited task and close the sheet. Shared by the Save button and voice.
+    private func commitEdit() {
+        let t = editedTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty else { return }
+        let cleanedSteps = editedSteps
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        editedCurrentTask = ParsedTask(
+            title: t,
+            category: current.category,
+            relativeTime: current.relativeTime,
+            urgency: current.urgency,
+            microSteps: cleanedSteps,
+            originalQuote: current.originalQuote
+        )
+        showEditSheet = false
+    }
+
+    private func logHeard(_ text: String, action: ReviewCommand?) {
+        let verb = action.map { "\($0)" } ?? "no match"
+        // User content: public on debug builds (device-log QA), redacted in release.
+        #if DEBUG
+        BDLog.command.log("review heard '\(text, privacy: .public)' editing=\(showEditSheet) -> \(verb, privacy: .public)")
+        #else
+        BDLog.command.log("review heard '\(text, privacy: .private)' editing=\(showEditSheet) -> \(verb, privacy: .public)")
+        #endif
     }
 
     @ViewBuilder
@@ -836,6 +869,7 @@ struct CardReviewView: View {
 private struct EditTaskSheet: View {
     @Binding var title: String
     @Binding var steps: [String]
+    var voiceEnabled: Bool = false
     let onSave: () -> Void
 
     var body: some View {
@@ -899,8 +933,15 @@ private struct EditTaskSheet: View {
                     .foregroundStyle(.white)
                     .clipShape(RoundedRectangle(cornerRadius: 14))
             }
-            .padding(.horizontal, 20).padding(.bottom, 12)
+            .padding(.horizontal, 20).padding(.bottom, voiceEnabled ? 4 : 12)
             .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+            if voiceEnabled {
+                Text("Or say \"save\" when you're done")
+                    .font(.bdMicro()).foregroundStyle(Color.bdMuted2)
+                    .frame(maxWidth: .infinity)
+                    .padding(.bottom, 12)
+            }
         }
         .background(Color.bdBg.ignoresSafeArea())
     }
