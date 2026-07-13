@@ -33,6 +33,8 @@ struct BrainDumpSheet: View {
     }()
     @State private var manualInput = ""
     @State private var permissionAlert: SpeechError?
+    /// Extracted task title -> the existing task title it duplicates, for the review-card warning.
+    @State private var duplicateOf: [String: String] = [:]
 
     private enum DumpState {
         case starting, ready, recording, processing, reviewing([ParsedTask])
@@ -62,6 +64,7 @@ struct BrainDumpSheet: View {
                 CardReviewView(
                     tasks: tasks,
                     currentIndex: $cardIndex,
+                    duplicateOf: duplicateOf,
                     onKeep: { save($0, tasks: tasks) },
                     onDiscard: { advance(tasks: tasks) },
                     onDone: { onComplete() }
@@ -158,13 +161,25 @@ struct BrainDumpSheet: View {
                         return seen.insert(key).inserted
                     }
                     print("[braindump:parsing] extracted \(result.tasks.count) tasks → \(unique.count) unique")
-                    cardIndex = 0
-                    if unique.isEmpty {
-                        // Never silently drop back to ready — tell the user nothing was captured.
-                        speak("I didn't catch any tasks. Try again.")
-                        withAnimation { state = .ready }
-                    } else {
-                        withAnimation { state = .reviewing(unique) }
+                    await MainActor.run {
+                        cardIndex = 0
+                        if unique.isEmpty {
+                            // Never silently drop back to ready — tell the user nothing was captured.
+                            speak("I didn't catch any tasks. Try again.")
+                            withAnimation { state = .ready }
+                        } else {
+                            // Flag tasks that duplicate one you already have, so the review card can
+                            // warn and let you confirm rather than silently piling on duplicates.
+                            let existing = (try? modelContext.fetch(FetchDescriptor<TaskItem>()))?.map { $0.title } ?? []
+                            var dups: [String: String] = [:]
+                            for t in unique {
+                                if let idx = TaskMatcher.bestMatchIndex(hint: t.title, titles: existing) {
+                                    dups[t.title] = existing[idx]
+                                }
+                            }
+                            duplicateOf = dups
+                            withAnimation { state = .reviewing(unique) }
+                        }
                     }
                 }
             } catch {
@@ -577,6 +592,7 @@ private struct ProcessingView: View {
 struct CardReviewView: View {
     let tasks: [ParsedTask]
     @Binding var currentIndex: Int
+    var duplicateOf: [String: String] = [:]
     let onKeep: (ParsedTask) -> Void
     let onDiscard: () -> Void
     let onDone: () -> Void
@@ -589,6 +605,7 @@ struct CardReviewView: View {
 
     private var current: ParsedTask { editedCurrentTask ?? tasks[currentIndex] }
     private var hasNext: Bool { currentIndex + 1 < tasks.count }
+    private var duplicateWarning: String? { duplicateOf[current.title] }
 
     var body: some View {
         VStack(spacing: 16) {
@@ -605,6 +622,15 @@ struct CardReviewView: View {
 
             Text("\(currentIndex + 1) of \(tasks.count)")
                 .font(.bdCaption()).foregroundStyle(Color.bdMuted)
+
+            if let existing = duplicateWarning {
+                Text("You already have \"\(existing)\". Keep to add it anyway, or skip.")
+                    .font(.bdCaption())
+                    .foregroundStyle(Color.bdRed)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 24)
+                    .transition(.opacity)
+            }
 
             Spacer()
 

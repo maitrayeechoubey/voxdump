@@ -187,6 +187,16 @@ final class AIParsingManager: ObservableObject {
         return ["clear ", "wipe ", "trash ", "delete ", "remove ", "nuke ", "get rid"].contains { t.hasPrefix($0) }
     }
 
+    /// A reminder is schedulable only if it names a real clock time (a digit, or a time-of-day
+    /// word). Pure dates ("today", "tomorrow", "this week", "friday") have no time-of-day and
+    /// cannot become a notification, so they should be tasks (with a relative-time label) instead.
+    static func hasClockTime(_ rawTime: String) -> Bool {
+        let t = rawTime.lowercased()
+        if t.range(of: "[0-9]", options: .regularExpression) != nil { return true }
+        return ["morning", "tonight", "afternoon", "evening", "noon", "midnight", "o'clock", "minute", "hour"]
+            .contains { t.contains($0) }
+    }
+
     #if canImport(FoundationModels)
     @available(iOS 26, macOS 26, *)
     private func parseWithFoundationModels(_ transcript: String) async throws -> ParsedDump {
@@ -256,14 +266,22 @@ final class AIParsingManager: ObservableObject {
             // Defense: AI sometimes misclassifies "remind me to X, that's it" as schedule_reminder
             // when there is no real time. If the returned time is empty or a known stop phrase,
             // reroute to task_creation using the hint so the input is never silently dropped.
+            // A reminder needs a real CLOCK time. Empty, hallucinated, or date-only ("today",
+            // "tomorrow", "this week") times cannot be scheduled, so route them to a visible task
+            // (carrying a relative-time label) instead of a silently-failing reminder.
             let timeIsAbsent = rawTime.isEmpty ||
                 TranscriptFilter.exactStopPhrases.contains(rawTime.lowercased()) ||
-                !Self.timeActuallyPresent(rawTime, in: transcript)   // reject hallucinated times
+                !Self.timeActuallyPresent(rawTime, in: transcript) ||   // reject hallucinated times
+                !Self.hasClockTime(rawTime)                             // date-only is a task, not a reminder
             if timeIsAbsent, let hint = hint, !hint.isEmpty {
+                let lt = rawTime.lowercased()
+                let rel: String? = lt.contains("tomorrow") ? "tomorrow"
+                    : lt.contains("today") ? "today"
+                    : lt.contains("week") ? "this_week" : nil
                 return ParsedDump(tasks: [ParsedTask(
                     title: hint,
                     category: "PERSONAL",
-                    relativeTime: nil,
+                    relativeTime: rel,
                     urgency: "medium",
                     microSteps: ["Complete task"],
                     originalQuote: hint
