@@ -1,0 +1,22 @@
+# macOS
+.DS_Store
+
+# Xcode build artifacts
+build/
+DerivedData/
+*.xcarchive
+*.xcuserstate
+xcuserdata/
+*.xcscmblueprint
+
+# Generated Xcode projects — xcodegen is the source of truth (run ./setup.sh).
+# Regenerated from project.yml, so they are not tracked.
+*.xcodeproj
+
+# Local scratch: dev harnesses, device logs, screenshots, session notes.
+# Kept out of the repo (contains large logs and personal identifiers).
+workspace/
+
+# MCP / tooling caches
+.playwright-mcp/
+.gwmcp/
