@@ -607,6 +607,13 @@ struct CardReviewView: View {
     @State private var editedTitle = ""
     @State private var editedSteps: [String] = []
     @State private var editedCurrentTask: ParsedTask? = nil
+    // Tracks whether we intend the review mic to be live, so a delayed (re)arm
+    // never fires after the card advanced or the sheet was dismissed.
+    @State private var voiceActive = false
+    // Let the audio session settle after the previous stopRecording() before we
+    // reactivate it. Starting the engine immediately after deactivation throws
+    // intermittently and used to leave the mic silently dead (try? swallowed it).
+    private let reArmDelay: TimeInterval = 0.3
 
     private var current: ParsedTask { editedCurrentTask ?? tasks[currentIndex] }
     private var hasNext: Bool { currentIndex + 1 < tasks.count }
@@ -681,9 +688,17 @@ struct CardReviewView: View {
             .padding(.bottom, voiceEnabled ? 8 : 40)
 
             if voiceEnabled {
-                Text("Or say \"accept\", \"decline\", or \"edit\"")
-                    .font(.bdMicro()).foregroundStyle(Color.bdMuted2)
-                    .padding(.bottom, 28)
+                HStack(spacing: 7) {
+                    Image(systemName: speech.isRecording ? "waveform" : "mic.slash.fill")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(speech.isRecording ? Color.bdGreen : Color.bdMuted2)
+                        .symbolEffect(.variableColor.iterative, isActive: speech.isRecording)
+                    Text(speech.isRecording
+                         ? "Listening… say \"accept\", \"decline\", or \"edit\""
+                         : "Say \"accept\", \"decline\", or \"edit\"")
+                        .font(.bdMicro()).foregroundStyle(Color.bdMuted2)
+                }
+                .padding(.bottom, 28)
             }
         }
         .sheet(isPresented: $showEditSheet) {
@@ -709,15 +724,40 @@ struct CardReviewView: View {
             armVoice()               // re-arm the mic for the next card
         }
         .onAppear { armVoice() }
-        .onDisappear { if voiceEnabled { speech.stopRecording() } }
+        .onDisappear { if voiceEnabled { stopVoice() } }
     }
 
     // Hands-free review: listen for a spoken command per card and map it to the same actions
     // as the buttons. Gated to device (voiceEnabled) so the simulator stays touch-only.
     private func armVoice() {
         guard voiceEnabled, !showEditSheet else { return }
-        speech.onSilenceDetected = { handleVoice(speech.transcript) }
-        try? speech.startRecording()
+        voiceActive = true
+        // Fully tear down any prior session first, then arm after a short settle
+        // (see reArmDelay) so the audio session has time to reactivate cleanly.
+        speech.stopRecording()
+        scheduleArm(attempt: 0)
+    }
+
+    private func scheduleArm(attempt: Int) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + reArmDelay) {
+            // Bail if the card advanced, the edit sheet opened, or we left review
+            // during the settle window — otherwise we'd revive the mic on a dead card.
+            guard voiceActive, voiceEnabled, !showEditSheet else { return }
+            speech.onSilenceDetected = { handleVoice(speech.transcript) }
+            do {
+                try speech.startRecording()
+                BDLog.speech.log("review: mic armed (card \(currentIndex), attempt \(attempt))")
+            } catch {
+                BDLog.speech.error("review: mic arm failed (card \(currentIndex), attempt \(attempt)): \(error.localizedDescription, privacy: .public)")
+                // Retry a couple of times; a transient session bounce usually clears.
+                if attempt < 2 { scheduleArm(attempt: attempt + 1) }
+            }
+        }
+    }
+
+    private func stopVoice() {
+        voiceActive = false
+        speech.stopRecording()
     }
 
     private func handleVoice(_ text: String) {
@@ -733,7 +773,7 @@ struct CardReviewView: View {
             editedSteps = current.microSteps
             showEditSheet = true
         } else if has(["done", "finish", "that's all", "thats all", "i'm done", "im done", "stop"]) {
-            speech.stopRecording()
+            stopVoice()
             onDone()
         } else {
             DispatchQueue.main.async { armVoice() }      // no command recognized, listen again

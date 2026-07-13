@@ -2,12 +2,18 @@ import SwiftUI
 import SwiftData
 
 struct TaskFocusView: View {
-    let taskID: PersistentIdentifier
+    @State private var taskID: PersistentIdentifier
     @Environment(\.dismiss) private var dismiss
     @Query private var allTasks: [TaskItem]
 
     @State private var showToast = false
     @State private var toastText = ""
+    // Slide direction for the last prev/next navigation so the content animates the right way.
+    @State private var navEdge: Edge = .trailing
+
+    init(taskID: PersistentIdentifier) {
+        _taskID = State(initialValue: taskID)
+    }
 
     private var task: TaskItem? { allTasks.first { $0.persistentModelID == taskID } }
 
@@ -15,12 +21,22 @@ struct TaskFocusView: View {
         allTasks.filter { !$0.isCompleted }.sorted { $0.createdAt < $1.createdAt }
     }
     private var taskIndex: Int? { incompleteTasks.firstIndex { $0.persistentModelID == taskID } }
+    private var canGoPrevious: Bool { (taskIndex ?? 0) > 0 }
+    private var canGoNext: Bool {
+        guard let i = taskIndex else { return false }
+        return i + 1 < incompleteTasks.count
+    }
 
     var body: some View {
         ZStack {
             Color.bdBg.ignoresSafeArea()
             if let task {
                 mainContent(task)
+                    .id(task.persistentModelID)
+                    .transition(.asymmetric(
+                        insertion: .move(edge: navEdge),
+                        removal: .move(edge: navEdge == .trailing ? .leading : .trailing)
+                    ))
             } else {
                 Color.bdBg.ignoresSafeArea()
                     .onAppear {
@@ -30,6 +46,18 @@ struct TaskFocusView: View {
             if showToast { toastOverlay.zIndex(10) }
         }
         .navigationBarHidden(true)
+        // Swipe right -> next task, swipe left -> previous (same "right = forward"
+        // convention as the review cards). simultaneousGesture so the step list still
+        // scrolls vertically; we only act on clearly-horizontal swipes.
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 24)
+                .onEnded { v in
+                    let dx = v.translation.width
+                    let dy = v.translation.height
+                    guard abs(dx) > 60, abs(dx) > abs(dy) * 1.5 else { return }
+                    if dx > 0 { goToNext() } else { goToPrevious() }
+                }
+        )
     }
 
     @ViewBuilder
@@ -50,8 +78,24 @@ struct TaskFocusView: View {
                 }
                 Spacer()
                 if let idx = taskIndex {
-                    Text("TASK \(idx + 1) OF \(incompleteTasks.count)")
-                        .font(.bdMicro()).foregroundStyle(Color.bdMuted)
+                    HStack(spacing: 12) {
+                        Button { goToPrevious() } label: {
+                            Image(systemName: "chevron.left")
+                                .font(.system(size: 15, weight: .semibold))
+                        }
+                        .disabled(!canGoPrevious)
+                        .foregroundStyle(canGoPrevious ? Color.bdMuted : Color.bdBorder)
+
+                        Text("TASK \(idx + 1) OF \(incompleteTasks.count)")
+                            .font(.bdMicro()).foregroundStyle(Color.bdMuted)
+
+                        Button { goToNext() } label: {
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 15, weight: .semibold))
+                        }
+                        .disabled(!canGoNext)
+                        .foregroundStyle(canGoNext ? Color.bdMuted : Color.bdBorder)
+                    }
                 }
             }
             .padding(.horizontal, 24).padding(.top, 20).padding(.bottom, 4)
@@ -196,6 +240,33 @@ struct TaskFocusView: View {
             .buttonStyle(.plain)
         }
         .frame(maxWidth: .infinity)
+    }
+
+    // Move to the next incomplete task (task N -> N+1). Bounded; a light warning
+    // haptic at the end so an edge swipe still feels intentional, not broken.
+    private func goToNext() {
+        guard let i = taskIndex, i + 1 < incompleteTasks.count else {
+            UINotificationFeedbackGenerator().notificationOccurred(.warning)
+            return
+        }
+        navEdge = .trailing
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+            taskID = incompleteTasks[i + 1].persistentModelID
+        }
+    }
+
+    // Move to the previous incomplete task (task N -> N-1).
+    private func goToPrevious() {
+        guard let i = taskIndex, i > 0 else {
+            UINotificationFeedbackGenerator().notificationOccurred(.warning)
+            return
+        }
+        navEdge = .leading
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+            taskID = incompleteTasks[i - 1].persistentModelID
+        }
     }
 
     private func showFeedback(_ text: String) {
