@@ -35,9 +35,33 @@ struct BrainDumpSheet: View {
     @State private var permissionAlert: SpeechError?
     /// Extracted task title -> the existing task title it duplicates, for the review-card warning.
     @State private var duplicateOf: [String: String] = [:]
+    /// A pending bulk-destructive command awaiting an explicit tap to confirm (irreversible wipes).
+    @State private var pendingBulkDelete: PendingBulkDelete?
 
     private enum DumpState {
         case starting, ready, recording, processing, reviewing([ParsedTask])
+    }
+
+    private enum BulkDeleteKind { case all, completed, completeAndClear }
+    private struct PendingBulkDelete: Identifiable {
+        let id = UUID()
+        let kind: BulkDeleteKind
+        let count: Int
+        private var noun: String { count == 1 ? "task" : "tasks" }
+        var title: String {
+            switch kind {
+            case .all:              return "Delete all \(count) \(noun)?"
+            case .completeAndClear: return "Complete and clear all \(count) \(noun)?"
+            case .completed:        return "Delete \(count) completed \(noun)?"
+            }
+        }
+        var confirmLabel: String {
+            switch kind {
+            case .all:              return "Delete All"
+            case .completeAndClear: return "Complete & Clear"
+            case .completed:        return "Delete Completed"
+            }
+        }
     }
 
     var body: some View {
@@ -94,6 +118,24 @@ struct BrainDumpSheet: View {
             Button("Use Text Instead") { textMode = true }
         } message: {
             Text(permissionAlert?.errorDescription ?? "")
+        }
+        // Explicit confirmation for irreversible bulk deletes (a voice command alone must not
+        // wipe the list). Requires a deliberate tap; Cancel leaves everything untouched.
+        .confirmationDialog(
+            pendingBulkDelete?.title ?? "",
+            isPresented: Binding(
+                get: { pendingBulkDelete != nil },
+                // Any dismissal (Cancel button or tapping outside) clears the pending delete and
+                // closes the sheet without deleting. Confirm runs performBulkDelete first.
+                set: { if !$0 { pendingBulkDelete = nil; dismiss() } }
+            ),
+            titleVisibility: .visible,
+            presenting: pendingBulkDelete
+        ) { pending in
+            Button(pending.confirmLabel, role: .destructive) { performBulkDelete(pending.kind) }
+            Button("Cancel", role: .cancel) { }
+        } message: { _ in
+            Text("This can't be undone.")
         }
     }
 
@@ -215,20 +257,16 @@ struct BrainDumpSheet: View {
             dismiss()
 
         case .deleteAll:
-            let descriptor = FetchDescriptor<TaskItem>()
-            if let tasks = try? modelContext.fetch(descriptor) { tasks.forEach { modelContext.delete($0) } }
-            UINotificationFeedbackGenerator().notificationOccurred(.warning)
-            dismiss()
+            // Irreversible whole-list wipe: confirm with an explicit tap before deleting anything.
+            let count = (try? modelContext.fetch(FetchDescriptor<TaskItem>()))?.count ?? 0
+            guard count > 0 else { speak("You don't have any tasks to delete."); dismiss(); return }
+            pendingBulkDelete = PendingBulkDelete(kind: .all, count: count)
 
         case .completeAndClear:
-            let allDesc = FetchDescriptor<TaskItem>()
-            if let tasks = try? modelContext.fetch(allDesc) {
-                tasks.forEach { $0.isCompleted = true; $0.microSteps.forEach { $0.isCompleted = true } }
-            }
-            let doneDesc = FetchDescriptor<TaskItem>(predicate: #Predicate { $0.isCompleted })
-            if let tasks = try? modelContext.fetch(doneDesc) { tasks.forEach { modelContext.delete($0) } }
-            UINotificationFeedbackGenerator().notificationOccurred(.success)
-            dismiss()
+            // Completes everything then deletes it, so it empties the list: confirm first.
+            let count = (try? modelContext.fetch(FetchDescriptor<TaskItem>()))?.count ?? 0
+            guard count > 0 else { dismiss(); return }
+            pendingBulkDelete = PendingBulkDelete(kind: .completeAndClear, count: count)
 
         case .completeNamed(let hint):
             let descriptor = FetchDescriptor<TaskItem>(
@@ -281,10 +319,9 @@ struct BrainDumpSheet: View {
             dismiss()
 
         case .deleteCompleted:
-            let descriptor = FetchDescriptor<TaskItem>(predicate: #Predicate { $0.isCompleted })
-            if let tasks = try? modelContext.fetch(descriptor) { tasks.forEach { modelContext.delete($0) } }
-            UINotificationFeedbackGenerator().notificationOccurred(.success)
-            dismiss()
+            let count = (try? modelContext.fetch(FetchDescriptor<TaskItem>(predicate: #Predicate { $0.isCompleted })))?.count ?? 0
+            guard count > 0 else { speak("You don't have any completed tasks to clear."); dismiss(); return }
+            pendingBulkDelete = PendingBulkDelete(kind: .completed, count: count)
 
         case .reactivateNamed(let hint):
             let descriptor = FetchDescriptor<TaskItem>(
@@ -341,6 +378,28 @@ struct BrainDumpSheet: View {
             dismiss()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { onCommand(command) }
         }
+    }
+
+    // Runs the actual bulk deletion, only after the user confirmed in the dialog.
+    private func performBulkDelete(_ kind: BulkDeleteKind) {
+        switch kind {
+        case .all:
+            if let tasks = try? modelContext.fetch(FetchDescriptor<TaskItem>()) {
+                tasks.forEach { modelContext.delete($0) }
+            }
+        case .completeAndClear:
+            if let tasks = try? modelContext.fetch(FetchDescriptor<TaskItem>()) {
+                tasks.forEach { $0.isCompleted = true; $0.microSteps.forEach { $0.isCompleted = true } }
+            }
+            let doneDesc = FetchDescriptor<TaskItem>(predicate: #Predicate { $0.isCompleted })
+            if let tasks = try? modelContext.fetch(doneDesc) { tasks.forEach { modelContext.delete($0) } }
+        case .completed:
+            let doneDesc = FetchDescriptor<TaskItem>(predicate: #Predicate { $0.isCompleted })
+            if let tasks = try? modelContext.fetch(doneDesc) { tasks.forEach { modelContext.delete($0) } }
+        }
+        UINotificationFeedbackGenerator().notificationOccurred(.warning)
+        pendingBulkDelete = nil
+        dismiss()
     }
 
     private func save(_ task: ParsedTask, tasks: [ParsedTask]) {
