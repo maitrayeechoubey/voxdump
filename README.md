@@ -1,12 +1,14 @@
 # Voxdump
 
-Voice-first, on-device task capture for people with ADHD. Speak a "brain dump" and Voxdump
-transcribes it on-device, then uses Apple Intelligence (the FoundationModels framework) to turn
-it into structured tasks with a category, urgency, timing, and 2 to 4 actionable micro-steps.
-Voice commands handle completing, reopening, deleting, listing, reading, and reminding.
+Voice dump your chaos. Apple Intelligence organizes it into tasks, on-device, in seconds.
+Free forever, no ads, completely private.
 
-Everything runs on-device. No account, no backend, nothing leaves your phone. When Apple
-Intelligence is unavailable, a built-in rule-based parser keeps the app working.
+Voxdump is voice-first, on-device task capture for people with ADHD. Speak a "brain dump" and
+it transcribes on-device, then uses Apple Intelligence (the FoundationModels framework) to turn
+it into structured tasks with a category, urgency, timing, and 2 to 4 actionable micro-steps.
+Voice commands handle completing, reopening, deleting, listing, reading, and reminding. No
+account, no backend, nothing leaves your phone. When Apple Intelligence is unavailable, a
+built-in rule-based parser keeps the app working.
 
 The app ships as **Voxdump.app**; the Swift module and source folder are named **FocusFlow**.
 
