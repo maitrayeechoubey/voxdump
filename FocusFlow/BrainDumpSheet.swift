@@ -24,7 +24,6 @@ struct BrainDumpSheet: View {
         return .starting
         #endif
     }()
-    @State private var cardIndex = 0
     @State private var textMode: Bool = {
         #if targetEnvironment(simulator)
         return true
@@ -97,13 +96,11 @@ struct BrainDumpSheet: View {
             case .reviewing(let tasks):
                 CardReviewView(
                     tasks: tasks,
-                    currentIndex: $cardIndex,
                     duplicateOf: duplicateOf,
                     speech: speech,
                     voiceEnabled: !textMode,
-                    onKeep: { save($0, tasks: tasks) },
-                    onDiscard: { advance(tasks: tasks) },
-                    onDone: { onComplete() }
+                    onKeep: { save($0) },
+                    onFinish: { onComplete() }
                 )
             }
         }
@@ -220,7 +217,6 @@ struct BrainDumpSheet: View {
                     }
                     print("[braindump:parsing] extracted \(result.tasks.count) tasks → \(unique.count) unique")
                     await MainActor.run {
-                        cardIndex = 0
                         if unique.isEmpty {
                             // Never silently drop back to ready — tell the user nothing was captured.
                             speak("I didn't catch any tasks. Try again.")
@@ -466,7 +462,7 @@ struct BrainDumpSheet: View {
         }
     }
 
-    private func save(_ task: ParsedTask, tasks: [ParsedTask]) {
+    private func save(_ task: ParsedTask) {
         let item = TaskItem(
             title: task.title,
             category: task.category,
@@ -481,16 +477,6 @@ struct BrainDumpSheet: View {
             item.microSteps.append(step)
         }
         UINotificationFeedbackGenerator().notificationOccurred(.success)
-        advance(tasks: tasks)
-    }
-
-    private func advance(tasks: [ParsedTask]) {
-        let next = cardIndex + 1
-        if next >= tasks.count {
-            onComplete()
-        } else {
-            withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) { cardIndex = next }
-        }
     }
 }
 
@@ -724,49 +710,101 @@ private struct ProcessingView: View {
 
 struct CardReviewView: View {
     let tasks: [ParsedTask]
-    @Binding var currentIndex: Int
     var duplicateOf: [String: String] = [:]
     @ObservedObject var speech: SpeechManager
     var voiceEnabled: Bool = false
     let onKeep: (ParsedTask) -> Void
-    let onDiscard: () -> Void
-    let onDone: () -> Void
+    let onFinish: () -> Void
+
+    // Working set: the cards still under review. Accept/decline REMOVE the current
+    // card (accept also saves via onKeep); when it empties, review is done. Kept
+    // separate from a plain scroll index so swipe can browse freely without ever
+    // re-accepting a card that was already actioned.
+    @State private var working: [ParsedTask] = []
+    @State private var index = 0
+    @State private var didInit = false
 
     @State private var drag: CGSize = .zero
     @State private var rot: Double = 0
     @State private var showEditSheet = false
     @State private var editedTitle = ""
     @State private var editedSteps: [String] = []
-    @State private var editedCurrentTask: ParsedTask? = nil
     // Tracks whether we intend the review mic to be live, so a delayed (re)arm
     // never fires after the card advanced or the sheet was dismissed.
     @State private var voiceActive = false
     // Set while an action is being applied so a trailing transcript update can't
     // fire the same command twice before the card re-arms.
     @State private var actionInFlight = false
+    // True while the edit sheet is capturing a spoken title, so transcript updates
+    // stream into the field instead of being matched as save/cancel commands.
+    @State private var dictating = false
     // Let the audio session settle after the previous stopRecording() before we
-    // reactivate it. Starting the engine immediately after deactivation throws
-    // intermittently and used to leave the mic silently dead (try? swallowed it).
+    // reactivate it (starting the engine immediately after deactivation throws
+    // intermittently and used to leave the mic silently dead).
     private let reArmDelay: TimeInterval = 0.3
 
-    private var current: ParsedTask { editedCurrentTask ?? tasks[currentIndex] }
-    private var hasNext: Bool { currentIndex + 1 < tasks.count }
-    private var duplicateWarning: String? { duplicateOf[current.title] }
+    // Swipe browses only when there is more than one card to move between; a lone
+    // card is accepted/declined via the buttons or voice, so swipe would be redundant.
+    private var canBrowse: Bool { working.count > 1 }
+    private var current: ParsedTask? { working.indices.contains(index) ? working[index] : nil }
+    private var hasNext: Bool { index + 1 < working.count }
+    private var duplicateWarning: String? { current.flatMap { duplicateOf[$0.title] } }
 
     var body: some View {
+        Group {
+            if let current {
+                reviewBody(current)
+            } else {
+                // Transient empty frame between the last removal and onFinish().
+                Color.bdBg
+            }
+        }
+        .sheet(isPresented: $showEditSheet) {
+            EditTaskSheet(
+                title: $editedTitle,
+                steps: $editedSteps,
+                voiceEnabled: voiceEnabled,
+                isDictating: dictating,
+                onDictateTitle: toggleTitleDictation,
+                onSave: commitEdit
+            )
+            .presentationDetents([.large])
+        }
+        // Entering/leaving the edit sheet re-arms so the matcher switches between
+        // review commands (accept/decline/edit) and edit commands (save/cancel).
+        .onChange(of: showEditSheet) { _, isOpen in
+            if !isOpen { dictating = false }
+            armVoice()
+        }
+        // While dictating a title, stream the transcript into the field; otherwise
+        // match commands the instant the recognizer produces them (waiting out the
+        // full silence timeout read as "not responding").
+        .onChange(of: speech.transcript) { _, txt in
+            if dictating { editedTitle = txt }
+            else { evaluate(txt, live: true) }
+        }
+        .onAppear {
+            if !didInit { working = tasks; didInit = true }
+            armVoice()
+        }
+        .onDisappear { if voiceEnabled { stopVoice() } }
+    }
+
+    @ViewBuilder
+    private func reviewBody(_ current: ParsedTask) -> some View {
         VStack(spacing: 16) {
-            // Progress segments
+            // Progress segments (current position highlighted; this is a browse index now).
             HStack(spacing: 5) {
-                ForEach(0..<tasks.count, id: \.self) { i in
+                ForEach(0..<working.count, id: \.self) { i in
                     RoundedRectangle(cornerRadius: 3)
-                        .fill(i <= currentIndex ? Color.bdPrimary : Color.bdBorder)
+                        .fill(i == index ? Color.bdPrimary : Color.bdBorder)
                         .frame(height: 4)
-                        .animation(.spring(response: 0.3), value: currentIndex)
+                        .animation(.spring(response: 0.3), value: index)
                 }
             }
             .padding(.horizontal, 24).padding(.top, 20)
 
-            Text("\(currentIndex + 1) of \(tasks.count)")
+            Text("\(index + 1) of \(working.count)")
                 .font(.bdCaption()).foregroundStyle(Color.bdMuted)
 
             if let existing = duplicateWarning {
@@ -782,27 +820,25 @@ struct CardReviewView: View {
 
             ZStack {
                 if hasNext {
-                    TaskCard(task: tasks[currentIndex + 1])
+                    TaskCard(task: working[index + 1])
                         .scaleEffect(0.92).offset(y: 18).opacity(0.5)
                 }
                 TaskCard(task: current)
                     .offset(drag)
                     .rotationEffect(.degrees(rot))
-                    .overlay(swipeOverlay)
                     .gesture(
                         DragGesture()
                             .onChanged { v in
+                                guard canBrowse else { return }
                                 drag = v.translation
-                                rot = Double(v.translation.width / 22)
+                                rot = Double(v.translation.width / 28)
                             }
                             .onEnded { v in
-                                if v.translation.width > 100       { animateOut(.right) }
-                                else if v.translation.width < -100 { animateOut(.left) }
-                                else {
-                                    withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
-                                        drag = .zero; rot = 0
-                                    }
-                                }
+                                guard canBrowse else { return }
+                                // Right = forward/next, matching TaskFocusView's swipe convention.
+                                if v.translation.width > 80       { goToNext() }
+                                else if v.translation.width < -80 { goToPrevious() }
+                                else { snapBack() }
                             }
                     )
             }
@@ -811,15 +847,17 @@ struct CardReviewView: View {
             Spacer()
 
             HStack(spacing: 32) {
-                labeledButton(icon: "xmark", label: "Decline", color: Color.bdRed) { animateOut(.left) }
-                labeledButton(icon: "pencil", label: "Edit", color: Color.bdMuted) {
-                    editedTitle = current.title
-                    editedSteps = current.microSteps
-                    showEditSheet = true
-                }
-                labeledButton(icon: "checkmark", label: "Accept", color: Color.bdGreen) { animateOut(.right) }
+                labeledButton(icon: "xmark", label: "Decline", color: Color.bdRed) { decline() }
+                labeledButton(icon: "pencil", label: "Edit", color: Color.bdMuted) { beginEdit(current) }
+                labeledButton(icon: "checkmark", label: "Accept", color: Color.bdGreen) { accept() }
             }
-            .padding(.bottom, voiceEnabled ? 8 : 40)
+            .padding(.bottom, canBrowse ? 12 : (voiceEnabled ? 8 : 40))
+
+            if canBrowse {
+                Text("Swipe to browse all \(working.count)")
+                    .font(.bdMicro()).foregroundStyle(Color.bdMuted2)
+                    .padding(.bottom, voiceEnabled ? 4 : 24)
+            }
 
             if voiceEnabled {
                 HStack(spacing: 7) {
@@ -835,49 +873,98 @@ struct CardReviewView: View {
                 .padding(.bottom, 28)
             }
         }
-        .sheet(isPresented: $showEditSheet) {
-            EditTaskSheet(title: $editedTitle, steps: $editedSteps, voiceEnabled: voiceEnabled, onSave: commitEdit)
-                .presentationDetents([.large])
-        }
-        .onChange(of: currentIndex) { _, _ in
-            editedCurrentTask = nil  // reset edits when card advances
-            armVoice()               // re-arm the mic for the next card
-        }
-        // Entering/leaving the edit sheet re-arms so the matcher switches between
-        // review commands (accept/decline/edit) and edit commands (save/cancel).
-        .onChange(of: showEditSheet) { _, _ in armVoice() }
-        // Match commands the instant the recognizer produces them instead of waiting
-        // out the full silence timeout (that ~3.5s lag read as "not responding").
-        .onChange(of: speech.transcript) { _, txt in evaluate(txt, live: true) }
-        .onAppear { armVoice() }
-        .onDisappear { if voiceEnabled { stopVoice() } }
     }
 
-    // Hands-free review: keep a mic live per card and map spoken commands to the same
-    // actions as the buttons. Gated to device (voiceEnabled) so the simulator stays
-    // touch-only. The matcher is context-aware: review commands on the card, save/cancel
-    // while the edit sheet is open.
+    // MARK: Review actions (accept/decline consume the current card; edit mutates in place)
+
+    private func beginEdit(_ task: ParsedTask) {
+        editedTitle = task.title
+        editedSteps = task.microSteps
+        showEditSheet = true
+    }
+
+    private func accept() {
+        guard let task = current, !actionInFlight else { return }
+        actionInFlight = true
+        speech.stopRecording()
+        onKeep(task)
+        animateOutAndRemove(.right)
+    }
+
+    private func decline() {
+        guard current != nil, !actionInFlight else { return }
+        actionInFlight = true
+        speech.stopRecording()
+        animateOutAndRemove(.left)
+    }
+
+    private func goToNext() {
+        guard index + 1 < working.count else { snapBack(); return }
+        withAnimation(.spring(response: 0.38, dampingFraction: 0.8)) {
+            drag = .zero; rot = 0; index += 1
+        }
+    }
+
+    private func goToPrevious() {
+        guard index > 0 else { snapBack(); return }
+        withAnimation(.spring(response: 0.38, dampingFraction: 0.8)) {
+            drag = .zero; rot = 0; index -= 1
+        }
+    }
+
+    private func snapBack() {
+        withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) { drag = .zero; rot = 0 }
+    }
+
+    private enum Side { case left, right }
+
+    private func animateOutAndRemove(_ side: Side) {
+        let tx: CGFloat = side == .right ? 520 : -520
+        withAnimation(.spring(response: 0.38, dampingFraction: 0.8)) {
+            drag = CGSize(width: tx, height: 0); rot = side == .right ? 16 : -16
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.28) { removeCurrent() }
+    }
+
+    private func removeCurrent() {
+        drag = .zero; rot = 0
+        guard working.indices.contains(index) else { return }
+        working.remove(at: index)
+        if working.isEmpty {
+            stopVoice()
+            onFinish()
+            return
+        }
+        if index >= working.count { index = working.count - 1 }
+        actionInFlight = false
+        // index may not change (removed the last card and clamped, or a middle card so
+        // the next slides into place), so re-arm explicitly rather than via onChange.
+        armVoice()
+    }
+
+    // MARK: Hands-free voice (device only)
+
+    // Keep a mic live per card and map spoken commands to the same actions as the
+    // buttons. Gated to device (voiceEnabled) so the simulator stays touch-only. The
+    // matcher is context-aware: review commands on the card, save/cancel in the sheet.
     private func armVoice() {
-        guard voiceEnabled else { return }
+        guard voiceEnabled, !dictating else { return }
         voiceActive = true
         actionInFlight = false
-        // Fully tear down any prior session first, then arm after a short settle
-        // (see reArmDelay) so the audio session has time to reactivate cleanly.
         speech.stopRecording()
         scheduleArm(attempt: 0)
     }
 
     private func scheduleArm(attempt: Int) {
         DispatchQueue.main.asyncAfter(deadline: .now() + reArmDelay) {
-            // Bail if we left review during the settle window, else we'd revive a dead mic.
-            guard voiceActive, voiceEnabled else { return }
+            // Bail if we left review during the settle window, else we would revive a dead mic.
+            guard voiceActive, voiceEnabled, !dictating else { return }
             speech.onSilenceDetected = { evaluate(speech.transcript, live: false) }
             do {
                 try speech.startRecording()
-                BDLog.speech.log("review: mic armed (card \(currentIndex), editing \(showEditSheet), attempt \(attempt))")
+                BDLog.speech.log("review: mic armed (card \(index), editing \(showEditSheet), attempt \(attempt))")
             } catch {
-                BDLog.speech.error("review: mic arm failed (card \(currentIndex), attempt \(attempt)): \(error.localizedDescription, privacy: .public)")
-                // Retry a couple of times; a transient session bounce usually clears.
+                BDLog.speech.error("review: mic arm failed (card \(index), attempt \(attempt)): \(error.localizedDescription, privacy: .public)")
                 if attempt < 2 { scheduleArm(attempt: attempt + 1) }
             }
         }
@@ -885,13 +972,14 @@ struct CardReviewView: View {
 
     private func stopVoice() {
         voiceActive = false
+        dictating = false
         speech.stopRecording()
     }
 
     // Evaluate a (possibly partial) transcript. `live` = a transcript update fired, so
     // act immediately; otherwise the silence fallback fired, so re-arm on no match.
     private func evaluate(_ text: String, live: Bool) {
-        guard voiceActive, !actionInFlight else { return }
+        guard voiceActive, !actionInFlight, !dictating else { return }
         guard let action = ReviewCommandMatcher.match(text, editing: showEditSheet) else {
             if !live { logHeard(text, action: nil); armVoice() }
             return
@@ -901,36 +989,69 @@ struct CardReviewView: View {
     }
 
     private func perform(_ action: ReviewCommand) {
-        actionInFlight = true
-        speech.stopRecording()                // cancel the recognizer so nothing double-fires
         switch action {
-        case .accept:  onKeep(current)         // saves + advances; onChange re-arms next card
-        case .decline: onDiscard()             // advances; onChange re-arms
-        case .edit:
-            editedTitle = current.title
-            editedSteps = current.microSteps
-            showEditSheet = true               // onChange(showEditSheet) arms edit-mode voice
-        case .save:    commitEdit()            // closes the sheet; onChange re-arms review
-        case .cancel:  showEditSheet = false   // discard edits; onChange re-arms review
-        case .done:    stopVoice(); onDone()
+        case .accept:  accept()
+        case .decline: decline()
+        case .edit:    if let c = current { beginEdit(c) }
+        case .save:    commitEdit()
+        case .cancel:  showEditSheet = false
+        case .done:    stopVoice(); onFinish()
         }
+    }
+
+    // MARK: Voice title dictation in the edit sheet (issue: edit page had no voice)
+
+    private func toggleTitleDictation() {
+        guard voiceEnabled else { return }
+        if dictating { finishTitleDictation() } else { startTitleDictation() }
+    }
+
+    private func startTitleDictation() {
+        dictating = true
+        actionInFlight = true   // suppress command matching while we capture the title
+        speech.stopRecording()
+        DispatchQueue.main.asyncAfter(deadline: .now() + reArmDelay) {
+            guard dictating else { return }
+            editedTitle = ""
+            speech.onSilenceDetected = { finishTitleDictation() }
+            do {
+                try speech.startRecording()
+                BDLog.speech.log("edit: dictating title")
+            } catch {
+                BDLog.speech.error("edit: dictation mic failed: \(error.localizedDescription, privacy: .public)")
+                dictating = false
+                armVoice()
+            }
+        }
+    }
+
+    private func finishTitleDictation() {
+        guard dictating else { return }
+        let spoken = speech.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !spoken.isEmpty { editedTitle = spoken }
+        dictating = false
+        speech.stopRecording()
+        BDLog.command.log("edit: dictated title committed")
+        armVoice()   // back to save/cancel command mode
     }
 
     // Build the edited task and close the sheet. Shared by the Save button and voice.
     private func commitEdit() {
         let t = editedTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !t.isEmpty else { return }
+        guard !t.isEmpty, working.indices.contains(index) else { return }
         let cleanedSteps = editedSteps
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
-        editedCurrentTask = ParsedTask(
+        let c = working[index]
+        working[index] = ParsedTask(
             title: t,
-            category: current.category,
-            relativeTime: current.relativeTime,
-            urgency: current.urgency,
+            category: c.category,
+            relativeTime: c.relativeTime,
+            urgency: c.urgency,
             microSteps: cleanedSteps,
-            originalQuote: current.originalQuote
+            originalQuote: c.originalQuote
         )
+        dictating = false
         showEditSheet = false
     }
 
@@ -942,27 +1063,6 @@ struct CardReviewView: View {
         #else
         BDLog.command.log("review heard '\(text, privacy: .private)' editing=\(showEditSheet) -> \(verb, privacy: .public)")
         #endif
-    }
-
-    @ViewBuilder
-    private var swipeOverlay: some View {
-        if drag.width > 30 {
-            RoundedRectangle(cornerRadius: 24).strokeBorder(Color.bdGreen, lineWidth: 2.5)
-                .overlay(alignment: .topLeading) {
-                    Text("ACCEPT")
-                        .font(.system(size: 24, weight: .black)).foregroundStyle(Color.bdGreen)
-                        .rotationEffect(.degrees(-14)).padding(24)
-                        .opacity(min(1, drag.width / 80))
-                }
-        } else if drag.width < -30 {
-            RoundedRectangle(cornerRadius: 24).strokeBorder(Color.bdRed, lineWidth: 2.5)
-                .overlay(alignment: .topTrailing) {
-                    Text("DECLINE")
-                        .font(.system(size: 24, weight: .black)).foregroundStyle(Color.bdRed)
-                        .rotationEffect(.degrees(14)).padding(24)
-                        .opacity(min(1, abs(drag.width) / 80))
-                }
-        }
     }
 
     private func labeledButton(icon: String, label: String, color: Color, action: @escaping () -> Void) -> some View {
@@ -980,19 +1080,6 @@ struct CardReviewView: View {
             }
         }
     }
-
-    private enum Side { case left, right }
-
-    private func animateOut(_ side: Side) {
-        let tx: CGFloat = side == .right ? 520 : -520
-        withAnimation(.spring(response: 0.38, dampingFraction: 0.8)) {
-            drag = CGSize(width: tx, height: 0); rot = side == .right ? 16 : -16
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.32) {
-            drag = .zero; rot = 0
-            if side == .right { onKeep(current) } else { onDiscard() }
-        }
-    }
 }
 
 // MARK: - Inline task title editor
@@ -1001,6 +1088,8 @@ private struct EditTaskSheet: View {
     @Binding var title: String
     @Binding var steps: [String]
     var voiceEnabled: Bool = false
+    var isDictating: Bool = false
+    var onDictateTitle: () -> Void = {}
     let onSave: () -> Void
 
     var body: some View {
@@ -1012,7 +1101,25 @@ private struct EditTaskSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("TITLE").font(.bdMicro()).foregroundStyle(Color.bdMuted)
+                        HStack {
+                            Text("TITLE").font(.bdMicro()).foregroundStyle(Color.bdMuted)
+                            Spacer()
+                            if voiceEnabled {
+                                Button(action: onDictateTitle) {
+                                    HStack(spacing: 5) {
+                                        Image(systemName: isDictating ? "waveform" : "mic.fill")
+                                            .font(.system(size: 11, weight: .semibold))
+                                            .symbolEffect(.variableColor.iterative, isActive: isDictating)
+                                        Text(isDictating ? "Listening…" : "Dictate")
+                                            .font(.bdMicro())
+                                    }
+                                    .foregroundStyle(isDictating ? Color.bdGreen : Color.bdPrimary)
+                                    .padding(.horizontal, 10).padding(.vertical, 5)
+                                    .background((isDictating ? Color.bdGreen : Color.bdPrimary).opacity(0.12))
+                                    .clipShape(Capsule())
+                                }
+                            }
+                        }
                         TextField("Task title", text: $title, axis: .vertical)
                             .font(.system(size: 20, weight: .semibold))
                             .foregroundStyle(.white)
@@ -1020,6 +1127,10 @@ private struct EditTaskSheet: View {
                             .background(Color.bdCard2)
                             .clipShape(RoundedRectangle(cornerRadius: 14))
                             .lineLimit(2...4)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 14)
+                                    .strokeBorder(isDictating ? Color.bdGreen : Color.clear, lineWidth: 1.5)
+                            )
                     }
 
                     VStack(alignment: .leading, spacing: 8) {
@@ -1068,9 +1179,13 @@ private struct EditTaskSheet: View {
             .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
             if voiceEnabled {
-                Text("Or say \"save\" when you're done")
+                Text(isDictating
+                     ? "Speak the new title, then pause"
+                     : "Tap Dictate to speak a new title, or say \"save\" when done")
                     .font(.bdMicro()).foregroundStyle(Color.bdMuted2)
                     .frame(maxWidth: .infinity)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 24)
                     .padding(.bottom, 12)
             }
         }

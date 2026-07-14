@@ -339,3 +339,61 @@ xcrun devicectl device install app --device 11563960-C47A-5A2B-9854-F4089F5ADDBE
 ```
 Device (Rahul's iPhone 17 Pro Max) coredevice UDID: `11563960-C47A-5A2B-9854-F4089F5ADDBE`. Or Xcode:
 Product > Clean Build Folder > Run. `devicectl` hangs if the phone is locked/asleep, so unlock first.
+
+## 15. 2026-07-13 (session 3): review-swipe redesign, edit-sheet voice, always-on Tasks voice
+
+Three requested fixes. Build SUCCEEDED, deterministic gate green (334 tests, 0 failures), and the
+non-voice paths were sim-verified. The voice paths stay device-only to verify (see 15.4).
+
+### 15.1 Review-card swipe now browses, and only when there is more than one card (`CardReviewView`)
+- Old behavior: every card (even a single task) used swipe-right = accept, swipe-left = decline, which
+  was redundant next to the labeled buttons and hands-free voice.
+- New behavior: **one task** = NO swipe (card is static; accept/decline via buttons or voice only).
+  **Multiple tasks** = swipe **browses** between cards (right = next, left = previous, matching
+  `TaskFocusView`), so you can look through all of them before acting. A "Swipe to browse all N" hint
+  shows only in the multi-card case.
+- Model change: `CardReviewView` now owns a mutable `working: [ParsedTask]` set + a browse `index`.
+  Accept saves via `onKeep` then REMOVES the card; decline just removes; when the set empties it calls
+  `onFinish`. This decouples "browse position" from "what has been actioned", so browsing back can never
+  re-accept a consumed card. Parent (`BrainDumpSheet`) simplified: `save(_:)` no longer advances, and the
+  old `advance(tasks:)` / `cardIndex` are gone. Renamed `onDone` -> `onFinish`; dropped `onDiscard`.
+- Sim-verified: typed a 3-task dump, confirmed "1 of 3" -> swipe-right -> "2 of 3" with the total
+  unchanged (browse, not accept), then accepted all 3 down to the list.
+
+### 15.2 Edit sheet gained voice (`EditTaskSheet` + `CardReviewView`)
+- The edit sheet had text fields only. Added a **Dictate** mic pill on the TITLE field (device only):
+  tap it, speak the new title, pause; the transcript streams into the field and commits on silence.
+  Save/cancel by voice already existed via `ReviewCommandMatcher(editing:)` and is unchanged.
+- Wiring: `CardReviewView.dictating` gates the transcript `onChange` so it feeds the title instead of
+  matching commands; `toggleTitleDictation`/`startTitleDictation`/`finishTitleDictation` manage the mic
+  and re-arm command mode afterward. Steps are still typed (title dictation was the ask; extend the same
+  way if steps-by-voice is wanted).
+
+### 15.3 Always-on hands-free voice on the Tasks list (`AllTasksView` + new `NavCommand.swift`)
+- The Tasks page had no voice; you had to tap the mic FAB. It now keeps a mic live (device only, default
+  on) and routes spoken commands, re-arming after each, mirroring `CardReviewView`'s arm/re-arm pattern.
+  A header pill shows listening state and toggles mute.
+- New `NavCommandMatcher` (testable, `VoxdumpNavCommandTests`, ~35 cases): `open`/`complete`/`delete`
+  a task by name (hint resolved with `TaskMatcher`), `newDump`, `readTasks`, `goBack`, `mute`. Name-bearing
+  commands return only the hint; a bare verb with no name never returns a command. **Voice delete is
+  confirmed** (reuses `BulkDeleteConfirmMatcher`): the app speaks "Delete X? yes/no" and only a clear yes
+  deletes, keeping the data-loss posture from 14.4. "open" pushes `TaskFocusView` via
+  `navigationDestination(item:)`; the listener pauses while a dump is capturing or a detail is pushed.
+- Sim note: `voiceSupported` is false on the simulator (as with the rest of the app's voice), so the pill
+  and listener are hidden there. Sim-verified only that the view renders and the list/FAB still work.
+
+### 15.4 Open items (on-device verification, supersedes 14.7 item 1)
+1. **Verify the new voice paths on device** (only unverifiable-on-sim work): (a) review-card browse still
+   coexists with hands-free accept/decline/edit; (b) edit-sheet **Dictate** captures a title and voice
+   "save" commits; (c) Tasks-page always-on: open/complete/read/new/back, and delete only after a spoken
+   "yes". Device logs: `tasks heard '...' -> ...`, `tasks: mic armed`, `review heard ...` (subsystem
+   `com.braindump`, category `command`/`speech`).
+2. **Tune on device:** the Tasks-page re-arm timing and whether continuous listening should also cover the
+   Home screen (currently Home auto-opens the dump; Tasks is the always-on surface). The nav swipe
+   direction (right = next) matches `TaskFocusView`; flip in `CardReviewView.reviewBody` if it feels wrong.
+3. Prior items still stand (speech on-device decision, input chunking, revoke exposed PATs).
+
+### 15.5 Files touched
+`FocusFlow/BrainDumpSheet.swift` (CardReviewView + EditTaskSheet rewrite, save simplification),
+`FocusFlow/AllTasksView.swift` (always-on listener + pill), `FocusFlow/NavCommand.swift` (NEW),
+`FocusFlowTests/VoxdumpNavCommandTests.swift` (NEW). Ran `xcodegen generate` after adding files.
