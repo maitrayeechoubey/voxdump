@@ -735,9 +735,6 @@ struct CardReviewView: View {
     // Set while an action is being applied so a trailing transcript update can't
     // fire the same command twice before the card re-arms.
     @State private var actionInFlight = false
-    // True while the edit sheet is capturing a spoken title, so transcript updates
-    // stream into the field instead of being matched as save/cancel commands.
-    @State private var dictating = false
     // Let the audio session settle after the previous stopRecording() before we
     // reactivate it (starting the engine immediately after deactivation throws
     // intermittently and used to leave the mic silently dead).
@@ -764,25 +761,16 @@ struct CardReviewView: View {
                 title: $editedTitle,
                 steps: $editedSteps,
                 voiceEnabled: voiceEnabled,
-                isDictating: dictating,
-                onDictateTitle: toggleTitleDictation,
                 onSave: commitEdit
             )
             .presentationDetents([.large])
         }
         // Entering/leaving the edit sheet re-arms so the matcher switches between
-        // review commands (accept/decline/edit) and edit commands (save/cancel).
-        .onChange(of: showEditSheet) { _, isOpen in
-            if !isOpen { dictating = false }
-            armVoice()
-        }
-        // While dictating a title, stream the transcript into the field; otherwise
-        // match commands the instant the recognizer produces them (waiting out the
-        // full silence timeout read as "not responding").
-        .onChange(of: speech.transcript) { _, txt in
-            if dictating { editedTitle = txt }
-            else { evaluate(txt, live: true) }
-        }
+        // review commands (accept/decline/edit) and edit commands (title/steps/save).
+        .onChange(of: showEditSheet) { _, _ in armVoice() }
+        // Match commands as the recognizer produces them (review), or on the finalized
+        // phrase (edit); evaluate() branches on showEditSheet.
+        .onChange(of: speech.transcript) { _, txt in evaluate(txt, live: true) }
         .onAppear {
             if !didInit { working = tasks; didInit = true }
             armVoice()
@@ -944,11 +932,11 @@ struct CardReviewView: View {
 
     // MARK: Hands-free voice (device only)
 
-    // Keep a mic live per card and map spoken commands to the same actions as the
-    // buttons. Gated to device (voiceEnabled) so the simulator stays touch-only. The
-    // matcher is context-aware: review commands on the card, save/cancel in the sheet.
+    // Keep a mic live and map spoken commands to the same actions as the buttons. Gated to
+    // device (voiceEnabled). Context-aware: review commands on the card, edit commands
+    // (title/steps/save/cancel) while the edit sheet is open.
     private func armVoice() {
-        guard voiceEnabled, !dictating else { return }
+        guard voiceEnabled else { return }
         voiceActive = true
         actionInFlight = false
         speech.stopRecording()
@@ -958,7 +946,7 @@ struct CardReviewView: View {
     private func scheduleArm(attempt: Int) {
         DispatchQueue.main.asyncAfter(deadline: .now() + reArmDelay) {
             // Bail if we left review during the settle window, else we would revive a dead mic.
-            guard voiceActive, voiceEnabled, !dictating else { return }
+            guard voiceActive, voiceEnabled else { return }
             speech.onSilenceDetected = { evaluate(speech.transcript, live: false) }
             do {
                 try speech.startRecording()
@@ -972,19 +960,30 @@ struct CardReviewView: View {
 
     private func stopVoice() {
         voiceActive = false
-        dictating = false
         speech.stopRecording()
     }
 
-    // Evaluate a (possibly partial) transcript. `live` = a transcript update fired, so
-    // act immediately; otherwise the silence fallback fired, so re-arm on no match.
+    // Evaluate a (possibly partial) transcript. Review commands fire live (instantly);
+    // edit commands fire only on the finalized (silence) phrase so a multi-word
+    // "change the title to ..." is not applied word by word.
     private func evaluate(_ text: String, live: Bool) {
-        guard voiceActive, !actionInFlight, !dictating else { return }
-        guard let action = ReviewCommandMatcher.match(text, editing: showEditSheet) else {
-            if !live { logHeard(text, action: nil); armVoice() }
+        guard voiceActive, !actionInFlight else { return }
+
+        if showEditSheet {
+            guard !live else { return }
+            guard let cmd = EditCommandMatcher.match(text) else {
+                logHeard(text, result: "no match"); armVoice(); return
+            }
+            logHeard(text, result: "\(cmd)")
+            applyEdit(cmd)
             return
         }
-        logHeard(text, action: action)
+
+        guard let action = ReviewCommandMatcher.match(text, editing: false) else {
+            if !live { logHeard(text, result: "no match"); armVoice() }
+            return
+        }
+        logHeard(text, result: "\(action)")
         perform(action)
     }
 
@@ -993,46 +992,23 @@ struct CardReviewView: View {
         case .accept:  accept()
         case .decline: decline()
         case .edit:    if let c = current { beginEdit(c) }
-        case .save:    commitEdit()
+        case .save:    commitEdit()          // unreachable from review mode; kept for exhaustiveness
         case .cancel:  showEditSheet = false
         case .done:    stopVoice(); onFinish()
         }
     }
 
-    // MARK: Voice title dictation in the edit sheet (issue: edit page had no voice)
-
-    private func toggleTitleDictation() {
-        guard voiceEnabled else { return }
-        if dictating { finishTitleDictation() } else { startTitleDictation() }
-    }
-
-    private func startTitleDictation() {
-        dictating = true
-        actionInFlight = true   // suppress command matching while we capture the title
-        speech.stopRecording()
-        DispatchQueue.main.asyncAfter(deadline: .now() + reArmDelay) {
-            guard dictating else { return }
-            editedTitle = ""
-            speech.onSilenceDetected = { finishTitleDictation() }
-            do {
-                try speech.startRecording()
-                BDLog.speech.log("edit: dictating title")
-            } catch {
-                BDLog.speech.error("edit: dictation mic failed: \(error.localizedDescription, privacy: .public)")
-                dictating = false
-                armVoice()
-            }
+    // Apply a spoken edit command to the working title/steps, then keep listening.
+    private func applyEdit(_ cmd: EditCommand) {
+        switch cmd {
+        case .setTitle(let s):   editedTitle = s; armVoice()
+        case .addStep(let s):    editedSteps.append(s); armVoice()
+        case .removeStep(let n): if editedSteps.indices.contains(n - 1) { editedSteps.remove(at: n - 1) }; armVoice()
+        case .removeLastStep:    if !editedSteps.isEmpty { editedSteps.removeLast() }; armVoice()
+        case .clearSteps:        editedSteps.removeAll(); armVoice()
+        case .save:              commitEdit()          // onChange(showEditSheet) re-arms review
+        case .cancel:            showEditSheet = false  // onChange(showEditSheet) re-arms review
         }
-    }
-
-    private func finishTitleDictation() {
-        guard dictating else { return }
-        let spoken = speech.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !spoken.isEmpty { editedTitle = spoken }
-        dictating = false
-        speech.stopRecording()
-        BDLog.command.log("edit: dictated title committed")
-        armVoice()   // back to save/cancel command mode
     }
 
     // Build the edited task and close the sheet. Shared by the Save button and voice.
@@ -1051,17 +1027,15 @@ struct CardReviewView: View {
             microSteps: cleanedSteps,
             originalQuote: c.originalQuote
         )
-        dictating = false
         showEditSheet = false
     }
 
-    private func logHeard(_ text: String, action: ReviewCommand?) {
-        let verb = action.map { "\($0)" } ?? "no match"
+    private func logHeard(_ text: String, result: String) {
         // User content: public on debug builds (device-log QA), redacted in release.
         #if DEBUG
-        BDLog.command.log("review heard '\(text, privacy: .public)' editing=\(showEditSheet) -> \(verb, privacy: .public)")
+        BDLog.command.log("review heard '\(text, privacy: .public)' editing=\(showEditSheet) -> \(result, privacy: .public)")
         #else
-        BDLog.command.log("review heard '\(text, privacy: .private)' editing=\(showEditSheet) -> \(verb, privacy: .public)")
+        BDLog.command.log("review heard '\(text, privacy: .private)' editing=\(showEditSheet) -> \(result, privacy: .public)")
         #endif
     }
 
@@ -1082,14 +1056,12 @@ struct CardReviewView: View {
     }
 }
 
-// MARK: - Inline task title editor
+// MARK: - Inline task editor (continuous voice, no tap required)
 
 private struct EditTaskSheet: View {
     @Binding var title: String
     @Binding var steps: [String]
     var voiceEnabled: Bool = false
-    var isDictating: Bool = false
-    var onDictateTitle: () -> Void = {}
     let onSave: () -> Void
 
     var body: some View {
@@ -1101,25 +1073,7 @@ private struct EditTaskSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            Text("TITLE").font(.bdMicro()).foregroundStyle(Color.bdMuted)
-                            Spacer()
-                            if voiceEnabled {
-                                Button(action: onDictateTitle) {
-                                    HStack(spacing: 5) {
-                                        Image(systemName: isDictating ? "waveform" : "mic.fill")
-                                            .font(.system(size: 11, weight: .semibold))
-                                            .symbolEffect(.variableColor.iterative, isActive: isDictating)
-                                        Text(isDictating ? "Listening…" : "Dictate")
-                                            .font(.bdMicro())
-                                    }
-                                    .foregroundStyle(isDictating ? Color.bdGreen : Color.bdPrimary)
-                                    .padding(.horizontal, 10).padding(.vertical, 5)
-                                    .background((isDictating ? Color.bdGreen : Color.bdPrimary).opacity(0.12))
-                                    .clipShape(Capsule())
-                                }
-                            }
-                        }
+                        Text("TITLE").font(.bdMicro()).foregroundStyle(Color.bdMuted)
                         TextField("Task title", text: $title, axis: .vertical)
                             .font(.system(size: 20, weight: .semibold))
                             .foregroundStyle(.white)
@@ -1127,16 +1081,15 @@ private struct EditTaskSheet: View {
                             .background(Color.bdCard2)
                             .clipShape(RoundedRectangle(cornerRadius: 14))
                             .lineLimit(2...4)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 14)
-                                    .strokeBorder(isDictating ? Color.bdGreen : Color.clear, lineWidth: 1.5)
-                            )
                     }
 
                     VStack(alignment: .leading, spacing: 8) {
                         Text("MICRO-STEPS").font(.bdMicro()).foregroundStyle(Color.bdMuted)
                         ForEach(steps.indices, id: \.self) { i in
                             HStack(spacing: 10) {
+                                Text("\(i + 1)")
+                                    .font(.bdMicro()).foregroundStyle(Color.bdMuted2)
+                                    .frame(width: 14)
                                 TextField("Step \(i + 1)", text: $steps[i], axis: .vertical)
                                     .font(.bdBody()).foregroundStyle(.white)
                                     .padding(12)
@@ -1179,9 +1132,7 @@ private struct EditTaskSheet: View {
             .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
             if voiceEnabled {
-                Text(isDictating
-                     ? "Speak the new title, then pause"
-                     : "Tap Dictate to speak a new title, or say \"save\" when done")
+                Text("Listening. Say \"change the title to…\", \"remove step 2\", \"add a step…\", or \"save\".")
                     .font(.bdMicro()).foregroundStyle(Color.bdMuted2)
                     .frame(maxWidth: .infinity)
                     .multilineTextAlignment(.center)

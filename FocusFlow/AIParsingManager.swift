@@ -95,7 +95,7 @@ final class AIParsingManager: ObservableObject {
     - category: exactly one of PERSONAL, WORK, HOME, FINANCE, HEALTH, ERRANDS.
     - relativeTime: today/tonight/tomorrow_morning/tomorrow/this_week, or empty if none.
     - urgency: high/medium/low.
-    - microSteps: 2 to 4 concrete, immediately actionable steps, each starting with a verb. For "Call the dentist": "Look up the dentist's number", "Call to book a cleaning", "Add the appointment to my calendar".
+    - microSteps: 2 to 4 steps that break down HOW to do THIS task. Each is a concrete action (a verb plus an object) that moves the task forward, NOT a restatement of the title and NOT a bare time. Do NOT copy steps from these instructions or from another task, and never add a step about a subject the task did not mention (no dentist, appointment, or calendar steps unless the task is actually about that).
     - originalQuote: the exact phrase from the transcript that triggered this task.
     Dedup identical titles. Trailing closers ("that's it", "done", "all done") at the END are end-of-speech, not tasks, but keep them mid-sentence ("call AT&T to cancel"). On self-correction ("actually", "no wait", "scratch that", "instead", "I meant", "change it to") keep ONLY the final version ("buy milk, scratch that, almond milk" -> Buy almond milk).
     """

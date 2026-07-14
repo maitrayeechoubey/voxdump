@@ -108,6 +108,17 @@ struct TaskFocusView: View {
                 Text(task.title)
                     .font(.bdTitle()).foregroundStyle(.white)
                     .fixedSize(horizontal: false, vertical: true)
+                // Preserve the spoken words that produced this task so the transcript
+                // behind the micro-steps is not lost after creation.
+                if let quote = task.originalQuote?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !quote.isEmpty {
+                    Text("\u{201C}\(quote)\u{201D}")
+                        .font(.system(size: 13, design: .serif))
+                        .italic()
+                        .foregroundStyle(Color.bdMuted)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 2)
+                }
             }
             .padding(.horizontal, 24)
 

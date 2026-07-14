@@ -40,6 +40,13 @@ final class SpeechManager: NSObject, ObservableObject {
         super.init()
         recognizer?.delegate = self
         authStatus = SFSpeechRecognizer.authorizationStatus()
+        // Seed mic permission from the system so a fresh instance (e.g. the always-on
+        // Tasks-list listener) can record once permission was granted anywhere in the app.
+        // Without this, micGranted stayed false on every instance except the one that
+        // called requestAuthorization(), so those mics failed with micNotAuthorized.
+        if #available(iOS 17.0, *) {
+            micGranted = AVAudioApplication.shared.recordPermission == .granted
+        }
     }
 
     func requestAuthorization() async {

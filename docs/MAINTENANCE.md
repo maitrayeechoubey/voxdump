@@ -397,3 +397,56 @@ non-voice paths were sim-verified. The voice paths stay device-only to verify (s
 `FocusFlow/BrainDumpSheet.swift` (CardReviewView + EditTaskSheet rewrite, save simplification),
 `FocusFlow/AllTasksView.swift` (always-on listener + pill), `FocusFlow/NavCommand.swift` (NEW),
 `FocusFlowTests/VoxdumpNavCommandTests.swift` (NEW). Ran `xcodegen generate` after adding files.
+
+## 16. 2026-07-13 (session 4): device-log bug fixes from session-3 feedback
+
+Fixes driven by on-device testing of session 3 (`workspace/vox-device.logarchive`). Build green,
+357 deterministic tests pass, and every non-voice change was sim-verified end to end.
+
+### 16.1 Tasks-list mic never armed (micNotAuthorized) — FIXED
+Device log showed `tasks: mic arm failed: Microphone is off` on every arm. `AllTasksView` created a
+fresh `SpeechManager` but never authorized it, so `micGranted` stayed false (that flag was only set by
+`requestAuthorization()`, which only the BrainDumpSheet instance called). Fix: `SpeechManager.init` now
+seeds `micGranted` from `AVAudioApplication.shared.recordPermission`, and `AllTasksView.onAppear` also
+calls `requestAuthorization()`. This is why the pill "listened" but nothing recorded and a tap only muted.
+
+### 16.2 Dentist micro-steps hallucinated onto unrelated tasks — FIXED
+The prompt (`AIParsingManager.instructions`) hardcoded a "Call the dentist" micro-step example
+("Look up the dentist's number / Call to book a cleaning / Add the appointment to my calendar"). The 3B
+on-device model copied it verbatim onto unrelated tasks (e.g. "go for a walk"). Fix: replaced the concrete
+example with a token-light DESCRIPTIVE rule (steps decompose HOW to do THIS task, verb-plus-object, never a
+title restatement or a bare time, never copied or about an unmentioned subject). No concrete example means
+nothing to copy, and it does not grow the prompt (mind the 4096 context limit; the harness still shows one
+`exceededContextWindowSize` edge on a long echo case, a documented residual). Sim-verified: a walk/plants
+dump produced relevant steps, and "prepare dinner"/"call the plumber" produced "Cook dinner"/"Serve meal"
+and "Call plumber"/"Report leak". NOTE: multi-item under-extraction on long rambling dumps is unchanged
+(documented FM residual; input chunking is the real lever).
+
+### 16.3 Transcript dropped after creation — FIXED
+`TaskFocusView` now shows `task.originalQuote` (italic serif) under the title, so the spoken source behind
+the micro-steps is preserved and visible on the detail, not just on the review card.
+
+### 16.4 Edit sheet: tap-to-Dictate removed, now conversational — FIXED
+Device log showed the user saying "correct the title to hello world" and "remove the first micro step" and
+getting `no match` (edit mode only matched save/cancel; title needed a Dictate tap). Removed the Dictate
+button and the whole dictation flow. New `EditCommand.swift` + `EditCommandMatcher` (tested,
+`VoxdumpEditCommandTests`): the sheet listens continuously and interprets a finalized phrase into
+setTitle / addStep / removeStep(n or ordinal or last) / clearSteps / save / cancel. Structured commands are
+matched before the bare save/cancel words so "change the title to save the report" sets the title. Manual
+typing still works. Steps are numbered in the UI so "remove step 2" is unambiguous.
+
+### 16.5 App icon
+Owner supplied a new icon at `~/Downloads/voxdump.jpeg` (1024x1024, no alpha, App Store compliant). It could
+NOT be converted from here: macOS TCC blocks this shell from `~/Downloads` (cp/sips/PIL all fail with
+"Operation not permitted"). To apply it, move it into the repo from a shell that has Downloads access, then
+convert to PNG and point `AppIcon.appiconset/Contents.json` at it. Left the existing icon in place meanwhile.
+
+### 16.6 Still device-only to verify (cannot run on the simulator, which forces textMode)
+The always-on Tasks-list voice commands (now that the mic is authorized), and the edit-sheet conversational
+voice. Device log markers: `tasks: mic armed`, `tasks heard '...' -> ...`, `review heard '...' editing=true -> ...`.
+
+### 16.7 Files touched
+`FocusFlow/SpeechManager.swift` (mic auth seed), `FocusFlow/AIParsingManager.swift` (micro-step prompt),
+`FocusFlow/TaskFocusView.swift` (transcript), `FocusFlow/AllTasksView.swift` (auth on appear),
+`FocusFlow/BrainDumpSheet.swift` (edit-sheet rework), `FocusFlow/EditCommand.swift` (NEW),
+`FocusFlowTests/VoxdumpEditCommandTests.swift` (NEW).

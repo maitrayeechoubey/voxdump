@@ -164,8 +164,15 @@ struct AllTasksView: View {
         .fullScreenCover(isPresented: $showBrainDump) {
             BrainDumpSheet(onComplete: { showBrainDump = false })
         }
-        // Voice lifecycle: arm/stop as the foreground ownership changes.
-        .onAppear { syncVoice() }
+        // Voice lifecycle: arm/stop as the foreground ownership changes. Authorize on this
+        // instance first so the listener can actually record (SpeechManager seeds micGranted
+        // from the system, and requesting also covers a cold first launch via the menu).
+        .onAppear {
+            Task { @MainActor in
+                if voiceSupported { await speech.requestAuthorization() }
+                syncVoice()
+            }
+        }
         .onDisappear { stopVoice() }
         .onChange(of: handsFree) { _, _ in syncVoice() }
         .onChange(of: showBrainDump) { _, _ in syncVoice() }
