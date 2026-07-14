@@ -270,7 +270,9 @@ struct AllTasksView: View {
         }
 
         guard let cmd = NavCommandMatcher.match(text) else {
-            if !live { armVoice() }
+            // Log on the finalized transcript so device logs show whether the mic is
+            // actually producing speech here (diagnostic for the "listening does nothing" report).
+            if !live { logHeard(text, cmd: nil); armVoice() }
             return
         }
         logHeard(text, cmd: cmd)

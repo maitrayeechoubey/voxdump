@@ -460,3 +460,26 @@ expected trade-off of dropping the concrete example: relevant-but-fewer steps in
 ones (one step is honest for an atomic task). Deliberately NOT tightening toward a hard 2-step minimum, since
 that just produces filler steps on atomic tasks. If revisited, add ONE non-leakable generic shape hint and
 re-measure with the harness.
+
+## 17. 2026-07-13 (session 5): edit-voice regression fix + tasks-listener diagnostic
+
+### 17.1 Edit-sheet voice "save" stopped working — FIXED
+Session 4 made the edit sheet act only on the finalized (silence) transcript (`guard !live else return`),
+so spoken "save" waited out the ~2.5s silence timeout instead of firing instantly like it used to, which read
+as "listening not active / save stopped working". Fix (`CardReviewView.evaluate`): edit commands now match
+LIVE again for the short discrete ones (save/cancel/removeStep/clearSteps) so "save" is instant; only the
+multi-word `setTitle`/`addStep` wait for silence (so a growing partial does not truncate the title/step).
+`applyEdit` now sets `actionInFlight` + stops the recognizer first so a trailing partial cannot double-fire.
+
+### 17.2 Tasks-list listener "does nothing" — DIAGNOSTIC ADDED, root cause pending fresh logs
+The auth fix (§16.1) should have armed the mic (the pill now shows "Listening"), but on device the commands
+still do nothing and the user must tap the FAB. The logarchive on disk is STALE (pre-session-4), so it cannot
+confirm what fails. Added a heard-transcript log on the no-match path (`AllTasksView.evaluate`) so the next
+device log distinguishes the cases: `tasks: mic arm failed` (auth/session), `tasks: mic armed` with NO
+`tasks heard` (armed but recognizer silent, likely audio-session contention with the dismissed BrainDumpSheet),
+`tasks heard '...' -> no match` (mic works, matcher misses), or a heard->command with no visible effect
+(action wiring). Suspected: audio-session hand-off race between the two SpeechManager instances (BrainDumpSheet
+vs AllTasksView) sharing one AVAudioSession. The durable fix is likely a single app-level shared voice engine.
+
+### 17.3 Files touched
+`FocusFlow/BrainDumpSheet.swift` (edit-voice live/silence split), `FocusFlow/AllTasksView.swift` (no-match log).

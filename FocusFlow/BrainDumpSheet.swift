@@ -970,12 +970,19 @@ struct CardReviewView: View {
         guard voiceActive, !actionInFlight else { return }
 
         if showEditSheet {
-            guard !live else { return }
-            guard let cmd = EditCommandMatcher.match(text) else {
-                logHeard(text, result: "no match"); armVoice(); return
+            if let cmd = EditCommandMatcher.match(text) {
+                // setTitle/addStep carry multi-word content, so commit them only on the
+                // finalized (silence) transcript to avoid truncating a partial. Short
+                // commands (save/cancel/removeStep/clearSteps) fire LIVE so "save" is instant
+                // (matching the pre-rework behavior that regressed to a ~2.5s silence wait).
+                let needsFullPhrase: Bool = { switch cmd { case .setTitle, .addStep: return true; default: return false } }()
+                if !(live && needsFullPhrase) {
+                    logHeard(text, result: "\(cmd)")
+                    applyEdit(cmd)
+                    return
+                }
             }
-            logHeard(text, result: "\(cmd)")
-            applyEdit(cmd)
+            if !live { logHeard(text, result: "no match"); armVoice() }
             return
         }
 
@@ -998,8 +1005,11 @@ struct CardReviewView: View {
         }
     }
 
-    // Apply a spoken edit command to the working title/steps, then keep listening.
+    // Apply a spoken edit command to the working title/steps, then keep listening. Sets
+    // actionInFlight and stops the recognizer first so a trailing partial cannot double-fire.
     private func applyEdit(_ cmd: EditCommand) {
+        actionInFlight = true
+        speech.stopRecording()
         switch cmd {
         case .setTitle(let s):   editedTitle = s; armVoice()
         case .addStep(let s):    editedSteps.append(s); armVoice()
