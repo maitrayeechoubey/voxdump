@@ -4,7 +4,9 @@ _Purpose: durable engineering context so any future session can support, fix, an
 app without re-deriving it. Pair this with the session-specific `handoff-voice-nav-fix.md`
 (which has the ship/distribution steps and the change-by-change narrative)._
 
-_Last updated: 2026-07-13._
+_Last updated: 2026-07-13 (session 2). See section 14 for the latest work: task-detail swipe nav,
+review/edit voice reliability, the delete-all data-loss fix, and bulk-delete confirmation (tap + voice).
+Section 14 also carries the current open items and the on-device install command._
 
 ---
 
@@ -182,6 +184,11 @@ plutil -p workspace/dd/Build/Products/Debug-iphonesimulator/Voxdump.app/Info.pli
 
 ## 10. Open items / next up
 
+> **Superseded by section 14 (2026-07-13 session 2).** Item 1 below is now split into the review
+> `evaluate`/`perform` path (renamed from `handleVoice`); items 2 to 4 still stand. See section 14
+> for the current open-items list (on-device voice verification, the reminder "just closes" UX,
+> voice-confirm usability).
+
 1. **Hands-free voice review cards** (`CardReviewView.armVoice`/`handleVoice`) shipped but is the one
    piece not verifiable headlessly — needs **on-device tuning** of the per-card mic re-arm timing. If
    it misbehaves, that is the place to look (no TTS during review, so echo is not the issue).
@@ -225,3 +232,110 @@ plutil -p workspace/dd/Build/Products/Debug-iphonesimulator/Voxdump.app/Info.pli
   intent labels for commands) and/or XCTest methods in `VoxdumpAIParsingEvalTests` / `EvalRunnerView`.
 - **Touch the review/edit UI:** it is all in `BrainDumpSheet.swift` (`CardReviewView`, `EditTaskSheet`,
   `TaskCard`). The task detail checklist is `TaskFocusView.swift`.
+
+## 14. 2026-07-13 (session 2): nav, voice reliability, data-loss delete fix, delete confirmation
+
+All shipped to `origin/main`. Latest commit `acb6a6a`. This section is self-contained for support.
+
+### 14.1 What shipped (commits, newest last)
+- `113ee47` Task-detail prev/next navigation + review-mic re-arm hardening.
+- `7b7f38c` Review-card voice reliability (instant partial matching, robust matcher, logging) + edit-sheet voice + `VoxdumpReviewCommandTests`.
+- `7d2434d` Data-loss fix: a named delete could wipe the whole list. Guards + `VoxdumpDestructiveGuardTests`.
+- `08cff43` Bulk-delete confirmation dialog (tap).
+- `1b753c9` Voice-confirm for bulk delete (speak prompt, then listen for yes/no).
+- `acb6a6a` Hardened the voice-confirm matcher (exact-match whitelist, safe by construction).
+
+### 14.2 Feature behavior
+- **Task detail nav** (`TaskFocusView`): swipe right or tap the header `chevron.right` goes to the NEXT
+  incomplete task; swipe left / `chevron.left` goes to PREVIOUS. Traverses the same `incompleteTasks`
+  list the "TASK X OF N" counter shows; chevrons disable at the ends. `taskID` is now `@State` so
+  navigation is in-place. Direction convention: right = forward (matches the review-card swipe).
+- **Review-card voice** (`CardReviewView`): says accept/decline/edit/done. Matches on PARTIAL transcript
+  (fires the instant the word is recognized, not after the ~3.5s silence timeout, which is what read as
+  "not responding"). Mic re-arm settles briefly + retries + logs (fixes the swallowed-`try?` dead mic).
+- **Edit-sheet voice**: say "save"/"done" to commit, "cancel" to discard. Matcher is context-aware.
+- **Bulk-delete confirmation**: `deleteAll`, `deleteCompleted`, `completeAndClear` now show a
+  `.confirmationDialog` ("Delete all N tasks? This can't be undone.") in `BrainDumpSheet`. Confirm by
+  TAP (Delete/Cancel) or, hands-free, by VOICE: the app speaks the prompt then listens for yes/no.
+
+### 14.3 New / changed code (where to look)
+- `FocusFlow/ReviewCommand.swift` (NEW, testable, `nonisolated`-friendly):
+  - `ReviewCommandMatcher.match(text, editing:)` returns `ReviewCommand` (accept/decline/edit/done or
+    save/cancel when `editing`). Whole-word matching; includes the "except" misrecognition of "accept".
+  - `BulkDeleteConfirmMatcher.match(text)` returns `ConfirmVerdict?` for a spoken yes/no. SAFE BY
+    CONSTRUCTION: returns nil on any "?", cancel on any "n't" or negation cue, and confirm ONLY when the
+    whole normalized reply EXACTLY matches a vetted affirmation set (no substring/token match, no
+    filler-stripping). Add natural affirmations to the set to reduce misses; you can never make it
+    unsafe by adding a genuine affirmation.
+- `FocusFlow/AIParsingManager.swift`: `guardedIntent(rawIntent, transcript)` and `mentionsEntireList(_)`
+  are pure `nonisolated static` funcs (so tests can call them). `guardedIntent` holds ALL the
+  deterministic destructive-safety intent guards (negation, destructive-clear, and the new delete-scope
+  guard). `parse()` now calls `guardedIntent` instead of inlining them.
+- `FocusFlow/BrainDumpSheet.swift`: `CardReviewView` voice = `armVoice`/`scheduleArm`/`evaluate`/`perform`
+  /`commitEdit`/`logHeard` (replaces the old `handleVoice`). Confirmation = `pendingBulkDelete` state +
+  `performBulkDelete` + `.confirmationDialog`; voice-confirm = `beginBulkConfirmVoice`/`armConfirmMic`/
+  `handleConfirmVoice` (uses `SpeakManager.isSpeaking` to arm the mic ONLY after the prompt finishes, so
+  the app never hears its own "yes").
+- `FocusFlow/TaskFocusView.swift`: `goToNext`/`goToPrevious` + swipe gesture + header chevrons.
+
+### 14.4 Data-loss invariant (DO NOT REGRESS)
+A delete that names a specific task can NEVER resolve to `deleteAll`. Enforced by: (a) empty-hint
+`delete_named` does nothing (never falls back to `deleteAll`); (b) `delete_all` only stands when
+`mentionsEntireList` matches the exact command object (so "delete the all-hands task" or "delete every
+overdue task" demote to a named delete, not a wipe); (c) all bulk deletes require confirmation (tap or a
+clear spoken yes; a question / negation / ambiguous reply never confirms). This bug (a spoken "remove
+nicobar island tasks" wiped ~12 unrelated tasks) is covered by `VoxdumpDestructiveGuardTests`.
+
+### 14.5 Tests
+- `VoxdumpReviewCommandTests` (~68): the review/edit voice matcher.
+- `VoxdumpDestructiveGuardTests` (~60): `guardedIntent`, `mentionsEntireList`, and
+  `BulkDeleteConfirmMatcher`; includes the exact regressions and the holes found in adversarial review
+  (name-collision, "every X", negation+affirmative, questions, sarcasm, filler+command).
+- **CORRECTION to section 7:** `AIFillerRuleEvalTests` is FM-backed (it calls `ai.parse`), NOT
+  deterministic. Exclude it from the deterministic gate; its ~16/30 "failures" are FM variance on
+  known-hard cases, not regressions.
+- Deterministic gate (301 tests, 0 failures at session end), run from the repo root:
+  ```
+  xcodebuild test -project Voxdump.xcodeproj -scheme Voxdump \
+    -destination 'platform=iOS Simulator,id=7097263B-359E-4A74-BF04-F9BE664AB6D8' -derivedDataPath workspace/dd \
+    -only-testing:FocusFlowTests/VoxdumpFallbackParserTests -only-testing:FocusFlowTests/VoxdumpTaskMatcherTests \
+    -only-testing:FocusFlowTests/VoxdumpTranscriptFilterTests -only-testing:FocusFlowTests/TranscriptFilterTests \
+    -only-testing:FocusFlowTests/VoxdumpReviewCommandTests -only-testing:FocusFlowTests/VoxdumpDestructiveGuardTests
+  ```
+- Persona-harness changes (device cases for the destructive scenarios + the `mentionsEntireList` mirror)
+  are in `workspace/persona_eval.swift`, which is git-ignored (LOCAL ONLY, not on origin).
+
+### 14.6 Verification state
+- Fully unit-tested: the matchers and the destructive-safety guards.
+- Sim-verified: task-detail nav (swipe + chevrons), and the confirmation DIALOG (tap Delete deletes,
+  tap-outside/Cancel keeps tasks).
+- NOT verifiable on the simulator (it forces `textMode`, so all voice is off there): the review-card
+  voice commands, edit-sheet voice, and the bulk-delete VOICE-confirm. These need on-device testing.
+  Device logs to watch: `review heard '...' -> ...`, `review: mic armed`, `bulk-delete heard '...' -> ...`,
+  `bulk-delete: listening for yes/no` (subsystem `com.braindump`, category `command`/`speech`).
+
+### 14.7 Open items (current, supersedes section 10)
+1. **On-device verify the voice paths** (the only unverified work): review accept/decline/edit; edit
+   "save"; bulk-delete voice "yes"/"no". The device was locked at session end so the install could not
+   be pushed from here.
+2. **Reminder "just closes" UX (STILL OPEN, not started):** "remind me to X tonight" (a clock time)
+   schedules a silent notification and closes with NO visible task, while "remind me to X tomorrow"
+   (date-only) becomes a task. Same-sounding commands fork on the time word, which reads as flaky. The
+   agreed direction is to make a scheduled reminder ALSO leave a visible task; not yet implemented. See
+   `ContentView.handleVoiceCommand` `.scheduleReminder` and `AIParsingManager.hasClockTime`.
+3. **Voice-confirm usability (by design, safe):** "sure" / "ok" / "okay" alone do NOT confirm a wipe
+   (only a clear yes/confirm/delete does). If users hit friction, add phrasings to
+   `BulkDeleteConfirmMatcher`'s whitelist (safe to expand with genuine affirmations).
+4. Prior items still stand: speech on-device decision (`requiresOnDeviceRecognition` / 1110 error),
+   input chunking for long dumps, revoke the exposed PATs.
+
+### 14.8 Install to the physical device (device was locked at session end)
+Unlock the iPhone + keep it awake, then either run the CLI install or use Xcode. Signed Debug binary
+built at `workspace/dd-device/Build/Products/Debug-iphoneos/Voxdump.app` (rebuild with the command in
+section 8 using `-destination 'generic/platform=iOS' -allowProvisioningUpdates`).
+```
+xcrun devicectl device install app --device 11563960-C47A-5A2B-9854-F4089F5ADDBE \
+  workspace/dd-device/Build/Products/Debug-iphoneos/Voxdump.app
+```
+Device (Rahul's iPhone 17 Pro Max) coredevice UDID: `11563960-C47A-5A2B-9854-F4089F5ADDBE`. Or Xcode:
+Product > Clean Build Folder > Run. `devicectl` hangs if the phone is locked/asleep, so unlock first.
