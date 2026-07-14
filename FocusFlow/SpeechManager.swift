@@ -4,6 +4,15 @@ import AVFoundation
 
 @MainActor
 final class SpeechManager: NSObject, ObservableObject {
+    // Single process-wide owner of the microphone. The mic and AVAudioSession are
+    // one physical/global resource; two SpeechManager instances (one for the Tasks
+    // list, one for the Brain Dump sheet) each ran their own AVAudioEngine and each
+    // toggled AVAudioSession.setActive(). They deactivated the session out from under
+    // each other (armed-but-hears-nothing) and raced installTap/removeTap on the same
+    // input hardware, which threw `CreateRecordingTap: (nullptr == Tap())` and hung the
+    // app. Enforce exactly one instance so there is one engine, one tap, one session owner.
+    static let shared = SpeechManager()
+
     @Published var transcript = ""
     @Published var isRecording = false
     @Published var authStatus: SFSpeechRecognizerAuthorizationStatus = .notDetermined
@@ -36,7 +45,8 @@ final class SpeechManager: NSObject, ObservableObject {
     private let semanticExtension: TimeInterval = 1.0
     private let countdownLeadTime: TimeInterval = 0.5
 
-    override init() {
+    // Private so `SpeechManager.shared` is the only instance — see the note above.
+    private override init() {
         super.init()
         recognizer?.delegate = self
         authStatus = SFSpeechRecognizer.authorizationStatus()
@@ -94,6 +104,13 @@ final class SpeechManager: NSObject, ObservableObject {
         }
 
         let node = engine.inputNode
+        // Always clear any stale tap before installing. A tap can linger when the
+        // engine was only *paused* (audio interruption) rather than stopped, or when a
+        // previous start() failed after the tap was installed. installTap() on an
+        // already-tapped node throws `CreateRecordingTap: (nullptr == Tap())`, an
+        // uncaught ObjC exception that hangs the app. removeTap on an untapped bus is a
+        // documented no-op, so this is always safe.
+        node.removeTap(onBus: 0)
         let format = node.inputFormat(forBus: 0)
         node.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buf, _ in
             self?.request?.append(buf)
@@ -173,8 +190,13 @@ final class SpeechManager: NSObject, ObservableObject {
         }
         if engine.isRunning {
             engine.stop()
-            engine.inputNode.removeTap(onBus: 0)
         }
+        // Remove the tap unconditionally, NOT only when isRunning. handleAudioInterruption
+        // pauses the engine on .began (Siri / a call), which leaves isRunning == false but
+        // the tap still installed. Guarding removeTap behind isRunning meant the next
+        // startRecording() skipped it, then installTap() crashed with
+        // `CreateRecordingTap: (nullptr == Tap())`. removeTap on an untapped bus is a no-op.
+        engine.inputNode.removeTap(onBus: 0)
         request?.endAudio()
         request = nil
         task?.cancel()

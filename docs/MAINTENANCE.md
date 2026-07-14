@@ -496,3 +496,68 @@ is now the card-stack convention (swipe LEFT = next, RIGHT = previous) with flic
 haptic. This intentionally DIFFERS from TaskFocusView's full-screen right=next nav (card stack vs page).
 Sim-verified: 1/3 -> swipe left -> 2/3 -> swipe right -> 1/3, with the correct task on each card.
 Files: `FocusFlow/BrainDumpSheet.swift`.
+
+## 19. 2026-07-13 (session 7): single shared mic engine + crash-proof tap lifecycle
+
+Reported six bugs (fresh device logarchive at `workspace/vox-device.logarchive`, mtime 21:05):
+1. Edit sheet says "listening" but does not actually listen / is not voice-editable.
+2. Tasks page shows the listening pill but nothing happens; only tapping the mic icon works.
+3. App hangs after a command ("mark an existing task done").
+4. App stops responding to taps.
+5. Closing and reopening the app shows a black screen.
+6. Siri cannot launch Voxdump.
+
+**Root cause (bugs 1-5 are ONE bug).** The device log ended with the smoking gun:
+```
+21:01:18.586 E  coreaudio  IPCAUClient: can't connect to server (-66748)
+21:01:21.672 E  avfaudio   required condition is false: [CreateRecordingTap: (nullptr == Tap())]
+```
+`CreateRecordingTap: (nullptr == Tap())` is AVAudioEngine refusing to install a recording tap
+because one is already installed. It is an uncaught ObjC exception -> the app hangs (bug 3),
+the main thread stops servicing touches (bug 4), and the next launch re-runs the same wedged
+audio path before the first frame (black screen, bug 5). Two independent causes fed it:
+
+- **Guarded teardown.** `SpeechManager.stopRecording()` only removed the tap `if engine.isRunning`.
+  `handleAudioInterruption(.began)` (Siri, a call, a route change) calls `engine.pause()`, which
+  leaves `isRunning == false` **with the tap still installed**. The next `startRecording()` therefore
+  skipped `removeTap`, then `installTap()` threw. (Siri activation is itself an interruption, which
+  is why "launch via Siri" — bug 6 — often ended in the same crash.)
+- **Two engines, one mic.** There were TWO `SpeechManager` instances — `@StateObject` in
+  `AllTasksView` (always-on list listener) and in `BrainDumpSheet` — each owning its own
+  `AVAudioEngine`, each toggling the process-wide `AVAudioSession.setActive()`. They deactivated the
+  session out from under each other, which is the *intermittent* "armed but hears nothing" in the
+  log (e.g. `tasks: mic armed` at 20:50:18 then silence; edit armed at 20:50:01 then reverted with no
+  `review heard`). This is bugs 1 and 2.
+
+**Fix.**
+- `SpeechManager` is now a singleton: `static let shared`, `private init()`. The mic + audio session
+  are one physical resource, so there is exactly one owner. Both views use
+  `@ObservedObject private var speech = SpeechManager.shared`. The list <-> sheet hand-off is now a
+  clean mode switch, not two engines racing. (Making `init` private prevents this regression class
+  from ever recurring — a second instance won't compile.)
+- Tap lifecycle is crash-proof: `stopRecording()` calls `engine.inputNode.removeTap(onBus: 0)`
+  **unconditionally** (not behind `isRunning`), and `startRecording()` calls `removeTap` immediately
+  before `installTap`. `removeTap` on an untapped bus is a documented no-op, so both are always safe.
+
+Hand-off ordering is safe with one engine: opening the sheet runs `AllTasksView.stopVoice()`
+synchronously (via `onChange`), while the sheet's `startRecording()` sits behind an `await
+requestAuthorization()` so it always runs afterward; closing re-arms the list behind a 0.3s settle;
+and every `startRecording()` path calls `stopRecording()` first (now idempotent).
+
+**Bug 6 (Siri).** Config is already correct: `CFBundleDisplayName`/`CFBundleName` both resolve to
+"Voxdump", and `FocusFlowShortcuts: AppShortcutsProvider` declares `"Open \(.applicationName)"` etc.
+The most likely failure was the launch-crash above (Siri launch -> 1.5s auto-open mic -> tap crash ->
+"can't launch"). No risky Siri config changes were made. Re-test on device after this build; if it
+still fails, it is App-Shortcut indexing latency (rebuild + open once + wait), not a code defect.
+
+**Verification.** Sim-verified (everything testable without a mic): app launches clean with the
+singleton (no black screen), 3-task parse works, transcript preserved on the card, micro-steps
+relevant (no hallucination), browse swipe 1/3 -> 2/3. The audio-lifecycle paths are DEVICE-ONLY
+(`voiceSupported == false` on the simulator) and still need on-device confirmation of bugs 1-6.
+
+**Secondary observations (not fixed this session, logged for later):** `completeNamed hint="quality
+task" match=nil candidates=8` — the fuzzy task matcher failed to resolve a "mark done" target; the
+crash fix stops the hang but the command still needs a matching task. Edit matcher: bare "Add a step"
+(no content) returned no match, and "change the title to X save" folded the trailing "save" into the
+title instead of saving. Both are matcher-quality items, separate from the audio crash.
+Files: `FocusFlow/SpeechManager.swift`, `FocusFlow/AllTasksView.swift`, `FocusFlow/BrainDumpSheet.swift`.

@@ -12,7 +12,10 @@ struct BrainDumpSheet: View {
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
-    @StateObject private var speech = SpeechManager()
+    // Shared singleton (see SpeechManager.shared): the Tasks list uses the same mic
+    // owner, so opening/closing this sheet is a clean hand-off rather than two engines
+    // racing the audio session.
+    @ObservedObject private var speech = SpeechManager.shared
     @StateObject private var ai = AIParsingManager()
     @StateObject private var speaker = SpeakManager()
     private let synth = AVSpeechSynthesizer()

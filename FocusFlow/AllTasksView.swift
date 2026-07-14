@@ -9,7 +9,9 @@ struct AllTasksView: View {
 
     // Hands-free (always-on) voice. Device only: the simulator forces textMode elsewhere
     // and has no usable mic, so we keep the list touch-only there.
-    @StateObject private var speech = SpeechManager()
+    // Shared singleton: the Brain Dump sheet uses the same instance so the two never
+    // fight over the mic / audio session during the list <-> sheet hand-off.
+    @ObservedObject private var speech = SpeechManager.shared
     @StateObject private var speaker = SpeakManager()
     @State private var handsFree = true
     @State private var voiceActive = false
