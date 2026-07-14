@@ -450,3 +450,13 @@ voice. Device log markers: `tasks: mic armed`, `tasks heard '...' -> ...`, `revi
 `FocusFlow/TaskFocusView.swift` (transcript), `FocusFlow/AllTasksView.swift` (auth on appear),
 `FocusFlow/BrainDumpSheet.swift` (edit-sheet rework), `FocusFlow/EditCommand.swift` (NEW),
 `FocusFlowTests/VoxdumpEditCommandTests.swift` (NEW).
+
+### 16.8 Persona harness result on the final prompt (`persona_eval.swift 4`, 85 cases)
+`FLAKY=8 FAIL=5` in 1164s. All 5 FAILs are the documented §9 residuals, NOT regressions from the micro-step
+rule change: read-pending vs read-today ("what's left to do", "things for today"), the compound
+"finish the laundry and start the dishes", and two multi-item reminders. The 8 extraction-QUALITY flags are
+all trivial tasks yielding a single micro-step ("Buy milk", "Buy eggs", "Pick up dry cleaning") — the
+expected trade-off of dropping the concrete example: relevant-but-fewer steps instead of padded/hallucinated
+ones (one step is honest for an atomic task). Deliberately NOT tightening toward a hard 2-step minimum, since
+that just produces filler steps on atomic tasks. If revisited, add ONE non-leakable generic shape hint and
+re-measure with the harness.
