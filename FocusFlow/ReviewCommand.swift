@@ -41,3 +41,29 @@ enum ReviewCommandMatcher {
         return nil
     }
 }
+
+enum ConfirmVerdict: Equatable { case confirm, cancel }
+
+// Interprets a spoken reply to a destructive confirmation ("Delete all N tasks? Say yes or no").
+enum BulkDeleteConfirmMatcher {
+    /// Cancel is checked FIRST and the bar for confirm is a clear affirmative, so anything
+    /// ambiguous never wipes. Returns nil for unclear replies (keep listening, never auto-confirm).
+    static func match(_ text: String) -> ConfirmVerdict? {
+        let t = text.lowercased()
+        let words = Set(t.split { !$0.isLetter }.map(String.init))
+        func word(_ ws: [String]) -> Bool { ws.contains { words.contains($0) } }
+        func phrase(_ ps: [String]) -> Bool { ps.contains { t.contains($0) } }
+
+        if word(["no", "nope", "cancel", "stop", "dont", "keep", "wait", "nevermind"])
+            || phrase(["never mind", "don't", "do not", "keep them", "keep it", "leave it",
+                       "leave them", "not now", "changed my mind"]) {
+            return .cancel
+        }
+        if word(["yes", "yeah", "yep", "yup", "confirm", "confirmed", "delete", "proceed", "sure", "definitely"])
+            || phrase(["do it", "go ahead", "delete all", "delete them", "wipe them", "wipe it",
+                       "yes please", "get rid"]) {
+            return .confirm
+        }
+        return nil
+    }
+}

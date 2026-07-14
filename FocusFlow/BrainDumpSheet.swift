@@ -14,6 +14,7 @@ struct BrainDumpSheet: View {
     @Environment(\.modelContext) private var modelContext
     @StateObject private var speech = SpeechManager()
     @StateObject private var ai = AIParsingManager()
+    @StateObject private var speaker = SpeakManager()
     private let synth = AVSpeechSynthesizer()
 
     @State private var state: DumpState = {
@@ -35,8 +36,10 @@ struct BrainDumpSheet: View {
     @State private var permissionAlert: SpeechError?
     /// Extracted task title -> the existing task title it duplicates, for the review-card warning.
     @State private var duplicateOf: [String: String] = [:]
-    /// A pending bulk-destructive command awaiting an explicit tap to confirm (irreversible wipes).
+    /// A pending bulk-destructive command awaiting confirmation (irreversible wipes).
     @State private var pendingBulkDelete: PendingBulkDelete?
+    /// True while listening for a spoken yes/no on a bulk-delete confirmation (device only).
+    @State private var confirmVoiceActive = false
 
     private enum DumpState {
         case starting, ready, recording, processing, reviewing([ParsedTask])
@@ -60,6 +63,13 @@ struct BrainDumpSheet: View {
             case .all:              return "Delete All"
             case .completeAndClear: return "Complete & Clear"
             case .completed:        return "Delete Completed"
+            }
+        }
+        var spokenPrompt: String {
+            switch kind {
+            case .all:              return "Delete all \(count) \(noun)? Say yes to confirm, or no to cancel."
+            case .completeAndClear: return "Complete and clear all \(count) \(noun)? Say yes to confirm, or no to cancel."
+            case .completed:        return "Delete \(count) completed \(noun)? Say yes to confirm, or no to cancel."
             }
         }
     }
@@ -127,7 +137,7 @@ struct BrainDumpSheet: View {
                 get: { pendingBulkDelete != nil },
                 // Any dismissal (Cancel button or tapping outside) clears the pending delete and
                 // closes the sheet without deleting. Confirm runs performBulkDelete first.
-                set: { if !$0 { pendingBulkDelete = nil; dismiss() } }
+                set: { if !$0 { confirmVoiceActive = false; speech.stopRecording(); pendingBulkDelete = nil; dismiss() } }
             ),
             titleVisibility: .visible,
             presenting: pendingBulkDelete
@@ -136,6 +146,10 @@ struct BrainDumpSheet: View {
             Button("Cancel", role: .cancel) { }
         } message: { _ in
             Text("This can't be undone.")
+        }
+        // Fully hands-free: once the spoken confirmation prompt finishes, listen for "yes"/"no".
+        .onChange(of: speaker.isSpeaking) { _, speaking in
+            if !speaking { armConfirmMic() }
         }
     }
 
@@ -261,12 +275,14 @@ struct BrainDumpSheet: View {
             let count = (try? modelContext.fetch(FetchDescriptor<TaskItem>()))?.count ?? 0
             guard count > 0 else { speak("You don't have any tasks to delete."); dismiss(); return }
             pendingBulkDelete = PendingBulkDelete(kind: .all, count: count)
+            beginBulkConfirmVoice()
 
         case .completeAndClear:
             // Completes everything then deletes it, so it empties the list: confirm first.
             let count = (try? modelContext.fetch(FetchDescriptor<TaskItem>()))?.count ?? 0
             guard count > 0 else { dismiss(); return }
             pendingBulkDelete = PendingBulkDelete(kind: .completeAndClear, count: count)
+            beginBulkConfirmVoice()
 
         case .completeNamed(let hint):
             let descriptor = FetchDescriptor<TaskItem>(
@@ -322,6 +338,7 @@ struct BrainDumpSheet: View {
             let count = (try? modelContext.fetch(FetchDescriptor<TaskItem>(predicate: #Predicate { $0.isCompleted })))?.count ?? 0
             guard count > 0 else { speak("You don't have any completed tasks to clear."); dismiss(); return }
             pendingBulkDelete = PendingBulkDelete(kind: .completed, count: count)
+            beginBulkConfirmVoice()
 
         case .reactivateNamed(let hint):
             let descriptor = FetchDescriptor<TaskItem>(
@@ -382,6 +399,8 @@ struct BrainDumpSheet: View {
 
     // Runs the actual bulk deletion, only after the user confirmed in the dialog.
     private func performBulkDelete(_ kind: BulkDeleteKind) {
+        confirmVoiceActive = false
+        speech.stopRecording()
         switch kind {
         case .all:
             if let tasks = try? modelContext.fetch(FetchDescriptor<TaskItem>()) {
@@ -400,6 +419,51 @@ struct BrainDumpSheet: View {
         UINotificationFeedbackGenerator().notificationOccurred(.warning)
         pendingBulkDelete = nil
         dismiss()
+    }
+
+    // Speak the confirmation prompt; the mic is armed for yes/no only AFTER it finishes
+    // (see .onChange(speaker.isSpeaking)), so the app never hears its own prompt. Device only.
+    private func beginBulkConfirmVoice() {
+        guard !textMode, let pending = pendingBulkDelete else { return }
+        confirmVoiceActive = true
+        speech.stopRecording()
+        speaker.speak(pending.spokenPrompt)
+    }
+
+    private func armConfirmMic() {
+        guard confirmVoiceActive, !textMode, pendingBulkDelete != nil else { return }
+        // Small settle after TTS playback before switching the session back to record.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+            guard confirmVoiceActive, pendingBulkDelete != nil else { return }
+            speech.onSilenceDetected = { handleConfirmVoice(speech.transcript) }
+            do {
+                try speech.startRecording()
+                BDLog.command.log("bulk-delete: listening for yes/no")
+            } catch {
+                BDLog.command.error("bulk-delete confirm mic failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    private func handleConfirmVoice(_ text: String) {
+        guard confirmVoiceActive, let pending = pendingBulkDelete else { return }
+        let verdict = BulkDeleteConfirmMatcher.match(text)
+        #if DEBUG
+        BDLog.command.log("bulk-delete heard '\(text, privacy: .public)' -> \(String(describing: verdict), privacy: .public)")
+        #else
+        BDLog.command.log("bulk-delete heard '\(text, privacy: .private)' -> \(String(describing: verdict), privacy: .public)")
+        #endif
+        switch verdict {
+        case .confirm:
+            performBulkDelete(pending.kind)              // stops the mic, deletes, dismisses
+        case .cancel:
+            confirmVoiceActive = false
+            speech.stopRecording()
+            pendingBulkDelete = nil
+            dismiss()
+        case .none:
+            DispatchQueue.main.async { armConfirmMic() }  // unclear: keep listening, never auto-confirm
+        }
     }
 
     private func save(_ task: ParsedTask, tasks: [ParsedTask]) {

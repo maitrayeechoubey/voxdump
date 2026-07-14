@@ -119,4 +119,23 @@ final class VoxdumpDestructiveGuardTests: XCTestCase {
     func test_entireList_true_reset() { XCTAssertTrue(AIParsingManager.mentionsEntireList("reset")) }
     func test_entireList_true_wholeList() { XCTAssertTrue(AIParsingManager.mentionsEntireList("delete the whole list")) }
     func test_entireList_true_deleteAllOfThem() { XCTAssertTrue(AIParsingManager.mentionsEntireList("delete all of them")) }
+
+    // MARK: Voice confirmation for bulk delete (BulkDeleteConfirmMatcher). Cancel-biased; a clear
+    // "yes" confirms, anything ambiguous or cancel-ish does not delete.
+
+    func test_confirm_yes() { XCTAssertEqual(BulkDeleteConfirmMatcher.match("yes"), .confirm) }
+    func test_confirm_yeahDoIt() { XCTAssertEqual(BulkDeleteConfirmMatcher.match("yeah do it"), .confirm) }
+    func test_confirm_confirm() { XCTAssertEqual(BulkDeleteConfirmMatcher.match("confirm"), .confirm) }
+    func test_confirm_deleteThemAll() { XCTAssertEqual(BulkDeleteConfirmMatcher.match("delete them all"), .confirm) }
+    func test_confirm_goAhead() { XCTAssertEqual(BulkDeleteConfirmMatcher.match("go ahead"), .confirm) }
+    func test_cancel_no() { XCTAssertEqual(BulkDeleteConfirmMatcher.match("no"), .cancel) }
+    func test_cancel_cancel() { XCTAssertEqual(BulkDeleteConfirmMatcher.match("cancel"), .cancel) }
+    func test_cancel_stop() { XCTAssertEqual(BulkDeleteConfirmMatcher.match("stop"), .cancel) }
+    func test_cancel_keepThem() { XCTAssertEqual(BulkDeleteConfirmMatcher.match("keep them"), .cancel) }
+    func test_cancel_neverMind() { XCTAssertEqual(BulkDeleteConfirmMatcher.match("never mind"), .cancel) }
+    func test_confirm_unclear_nil() { XCTAssertNil(BulkDeleteConfirmMatcher.match("hmm maybe")) }
+    func test_confirm_empty_nil() { XCTAssertNil(BulkDeleteConfirmMatcher.match("")) }
+    // Ambiguity resolves toward cancel (safe); whole-word so "now" != "no".
+    func test_confirm_ambiguous_biasesCancel() { XCTAssertEqual(BulkDeleteConfirmMatcher.match("no actually yes"), .cancel) }
+    func test_confirm_deleteNow_notCancel() { XCTAssertEqual(BulkDeleteConfirmMatcher.match("delete them now"), .confirm) }
 }
