@@ -823,9 +823,12 @@ struct CardReviewView: View {
                             }
                             .onEnded { v in
                                 guard canBrowse else { return }
-                                // Right = forward/next, matching TaskFocusView's swipe convention.
-                                if v.translation.width > 80       { goToNext() }
-                                else if v.translation.width < -80 { goToPrevious() }
+                                // Card-stack convention: swipe LEFT advances to the next card,
+                                // swipe RIGHT goes to the previous. A quick flick counts too.
+                                let dx = v.translation.width
+                                let flick = v.predictedEndTranslation.width
+                                if dx < -70 || flick < -250 { navigate(next: true) }
+                                else if dx > 70 || flick > 250 { navigate(next: false) }
                                 else { snapBack() }
                             }
                     )
@@ -886,17 +889,22 @@ struct CardReviewView: View {
         animateOutAndRemove(.left)
     }
 
-    private func goToNext() {
-        guard index + 1 < working.count else { snapBack(); return }
-        withAnimation(.spring(response: 0.38, dampingFraction: 0.8)) {
-            drag = .zero; rot = 0; index += 1
+    // Browse to the next/previous card with a real slide: the current card flies off in the
+    // swipe direction, then the target card slides in from the opposite edge, so it clearly
+    // navigates rather than snapping back to center with a content swap.
+    private func navigate(next: Bool) {
+        guard next ? (index + 1 < working.count) : (index > 0) else { snapBack(); return }
+        let exitX: CGFloat = next ? -520 : 520
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+            drag = CGSize(width: exitX, height: 0)
+            rot = next ? -8 : 8
         }
-    }
-
-    private func goToPrevious() {
-        guard index > 0 else { snapBack(); return }
-        withAnimation(.spring(response: 0.38, dampingFraction: 0.8)) {
-            drag = .zero; rot = 0; index -= 1
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
+            index += next ? 1 : -1
+            drag = CGSize(width: -exitX, height: 0)   // start the incoming card off the opposite edge
+            rot = 0
+            withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) { drag = .zero }
         }
     }
 

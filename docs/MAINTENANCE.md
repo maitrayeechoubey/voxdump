@@ -483,3 +483,16 @@ vs AllTasksView) sharing one AVAudioSession. The durable fix is likely a single 
 
 ### 17.3 Files touched
 `FocusFlow/BrainDumpSheet.swift` (edit-voice live/silence split), `FocusFlow/AllTasksView.swift` (no-match log).
+
+## 18. 2026-07-13 (session 6): review-card browse swipe fix
+
+Reported: on a multi-task review, left/right swipe "shows the next card but doesn't navigate."
+Two causes in `CardReviewView`: (1) direction was right=next (matching TaskFocusView), so a natural
+left-swipe at the first card hit `goToPrevious`'s guard and snapped back; (2) `goToNext` did
+`drag = .zero; index += 1` together, so the card bounced back to center and swapped content in place
+instead of sliding away, which read as "didn't navigate". Fix: `navigate(next:)` slides the current card
+fully off in the swipe direction, then slides the target card in from the opposite edge, and the direction
+is now the card-stack convention (swipe LEFT = next, RIGHT = previous) with flick detection + a light
+haptic. This intentionally DIFFERS from TaskFocusView's full-screen right=next nav (card stack vs page).
+Sim-verified: 1/3 -> swipe left -> 2/3 -> swipe right -> 1/3, with the correct task on each card.
+Files: `FocusFlow/BrainDumpSheet.swift`.
