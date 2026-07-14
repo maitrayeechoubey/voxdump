@@ -133,9 +133,45 @@ final class VoxdumpDestructiveGuardTests: XCTestCase {
     func test_cancel_stop() { XCTAssertEqual(BulkDeleteConfirmMatcher.match("stop"), .cancel) }
     func test_cancel_keepThem() { XCTAssertEqual(BulkDeleteConfirmMatcher.match("keep them"), .cancel) }
     func test_cancel_neverMind() { XCTAssertEqual(BulkDeleteConfirmMatcher.match("never mind"), .cancel) }
-    func test_confirm_unclear_nil() { XCTAssertNil(BulkDeleteConfirmMatcher.match("hmm maybe")) }
+    func test_confirm_unclear_nil() { XCTAssertNil(BulkDeleteConfirmMatcher.match("hmm")) }
     func test_confirm_empty_nil() { XCTAssertNil(BulkDeleteConfirmMatcher.match("")) }
     // Ambiguity resolves toward cancel (safe); whole-word so "now" != "no".
     func test_confirm_ambiguous_biasesCancel() { XCTAssertEqual(BulkDeleteConfirmMatcher.match("no actually yes"), .cancel) }
     func test_confirm_deleteNow_notCancel() { XCTAssertEqual(BulkDeleteConfirmMatcher.match("delete them now"), .confirm) }
+    // "sure" must NOT authorize a wipe: hesitation never confirms an irreversible delete.
+    func test_notSure_neverConfirms() {
+        XCTAssertNotEqual(BulkDeleteConfirmMatcher.match("not sure"), .confirm)
+        XCTAssertEqual(BulkDeleteConfirmMatcher.match("not sure"), .cancel)
+    }
+    func test_sureIGuess_neverConfirms() { XCTAssertNotEqual(BulkDeleteConfirmMatcher.match("sure I guess"), .confirm) }
+    func test_areYouSure_neverConfirms() { XCTAssertNotEqual(BulkDeleteConfirmMatcher.match("are you sure"), .confirm) }
+    func test_maybe_cancel() { XCTAssertEqual(BulkDeleteConfirmMatcher.match("maybe"), .cancel) }
+    // Negation attached to an affirmative must never confirm (the whole class, not just strings).
+    func test_notYes_neverConfirms() { XCTAssertNotEqual(BulkDeleteConfirmMatcher.match("not yes"), .confirm) }
+    func test_definitelyNot_neverConfirms() { XCTAssertNotEqual(BulkDeleteConfirmMatcher.match("definitely not"), .confirm) }
+    func test_notGoAhead_neverConfirms() { XCTAssertNotEqual(BulkDeleteConfirmMatcher.match("not go ahead"), .confirm) }
+    func test_wouldntDoIt_neverConfirms() { XCTAssertNotEqual(BulkDeleteConfirmMatcher.match("i wouldn't do it"), .confirm) }
+    func test_letsNotDoIt_neverConfirms() { XCTAssertNotEqual(BulkDeleteConfirmMatcher.match("let's not do it"), .confirm) }
+    func test_question_neverConfirms() { XCTAssertNil(BulkDeleteConfirmMatcher.match("delete what?")) }
+    func test_hyphenTrap_neverConfirms() { XCTAssertNotEqual(BulkDeleteConfirmMatcher.match("yes-terday"), .confirm) }
+    // Clear affirmatives still confirm after the negation-class hardening.
+    func test_confirm_stillWorks_yesDoIt() { XCTAssertEqual(BulkDeleteConfirmMatcher.match("yes do it"), .confirm) }
+    func test_confirm_stillWorks_proceed() { XCTAssertEqual(BulkDeleteConfirmMatcher.match("proceed"), .confirm) }
+    // Exact-match whitelist: a full sentence that merely CONTAINS an affirmative never confirms
+    // (questions without "?", sarcasm, deliberation, echoes of the prompt).
+    func test_questionNoMark_neverConfirms() { XCTAssertNotEqual(BulkDeleteConfirmMatcher.match("do you really want to delete"), .confirm) }
+    func test_sarcasm_yeahRight_neverConfirms() { XCTAssertNotEqual(BulkDeleteConfirmMatcher.match("yeah right"), .confirm) }
+    func test_deliberative_weShouldProceed_neverConfirms() { XCTAssertNotEqual(BulkDeleteConfirmMatcher.match("we should proceed"), .confirm) }
+    func test_sarcasm_greatIdea_neverConfirms() { XCTAssertNotEqual(BulkDeleteConfirmMatcher.match("oh sure delete everything great idea"), .confirm) }
+    func test_echo_deleteWhat_neverConfirms() { XCTAssertNil(BulkDeleteConfirmMatcher.match("why would i delete that")) }
+    func test_bareDelete_confirms() { XCTAssertEqual(BulkDeleteConfirmMatcher.match("delete"), .confirm) }
+    func test_okYes_confirms() { XCTAssertEqual(BulkDeleteConfirmMatcher.match("ok yes"), .confirm) }
+    // Non-affirming filler + a bare command must NOT confirm (no filler-stripping).
+    func test_soDelete_neverConfirms() { XCTAssertNil(BulkDeleteConfirmMatcher.match("so delete")) }
+    func test_justDelete_neverConfirms() { XCTAssertNil(BulkDeleteConfirmMatcher.match("just delete")) }
+    func test_umProceed_neverConfirms() { XCTAssertNil(BulkDeleteConfirmMatcher.match("um proceed")) }
+    func test_andDeleteThemAll_neverConfirms() { XCTAssertNil(BulkDeleteConfirmMatcher.match("and delete them all")) }
+    func test_okDelete_neverConfirms() { XCTAssertNil(BulkDeleteConfirmMatcher.match("ok delete")) }
+    func test_yesPlease_confirms() { XCTAssertEqual(BulkDeleteConfirmMatcher.match("yes please"), .confirm) }
+    func test_deleteAllOfThem_confirms() { XCTAssertEqual(BulkDeleteConfirmMatcher.match("delete all of them"), .confirm) }
 }
