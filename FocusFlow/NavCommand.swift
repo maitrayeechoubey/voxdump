@@ -20,9 +20,13 @@ enum TaskSelector: Equatable {
 /// A relative day used by date-scoped bulk commands.
 enum DayReference: Equatable { case today, yesterday }
 
+/// Which slice of the task list to display. Hashable so it can ride in a navigation route.
+enum TaskFilter: Hashable { case all, pending, completed }
+
 enum NavCommand: Equatable {
     case newDump              // start a brain dump
     case readTasks            // speak the list aloud
+    case showTasks(TaskFilter) // navigate to / filter the task list (voice navigation from Home)
     case goBack               // pop to home / close the list
     case mute                 // turn off always-on listening
     case open(TaskSelector)      // open a single task
@@ -64,6 +68,25 @@ enum NavCommandMatcher {
         if phrase(["read my tasks", "read tasks", "read them", "read the list", "read my list",
                    "what's on my list", "whats on my list", "what do i have", "list my tasks"])
             || (has(["read"]) && has(["task", "tasks", "list", "them"])) { return .readTasks }
+
+        // Show / navigate to the task list (voice navigation, primarily from Home). Checked before
+        // the open verb so "show my tasks" navigates instead of trying to open a task called "tasks".
+        let pendingWords = ["pending", "incomplete", "unfinished", "remaining", "outstanding", "to-do", "todo", "left", "open"]
+        let doneWords = ["completed", "complete", "done", "finished", "checked"]
+        if phrase(["show tasks", "show my tasks", "show me my tasks", "show me the tasks", "my tasks",
+                   "the task list", "task list", "go to tasks", "go to my tasks", "take me to tasks",
+                   "take me to my tasks", "open tasks", "open my tasks", "open the task list",
+                   "see my tasks", "view my tasks", "view tasks", "show the list", "show my list",
+                   "pull up my tasks", "pull up tasks", "what are my tasks", "what tasks do i have"]) {
+            if has(pendingWords) { return .showTasks(.pending) }
+            if has(doneWords) { return .showTasks(.completed) }
+            return .showTasks(.all)
+        }
+        // Bare filter phrases ("show pending", "pending tasks", "show completed").
+        if phrase(["show pending", "pending tasks", "show my pending", "show incomplete",
+                   "show remaining", "show outstanding", "what's pending", "whats pending"]) { return .showTasks(.pending) }
+        if phrase(["show completed", "completed tasks", "show done", "show finished",
+                   "show my completed", "what's completed", "whats completed", "show done tasks"]) { return .showTasks(.completed) }
 
         // Reactivate / reopen a completed task. Checked before "complete" so "mark as not done"
         // and "reopen" are not swallowed by the completion verbs.
@@ -210,7 +233,7 @@ enum NavCommandResolver {
         let completed = tasks.indices.filter { tasks[$0].isCompleted }
 
         switch command {
-        case .newDump, .readTasks, .goBack, .mute:
+        case .newDump, .readTasks, .showTasks, .goBack, .mute:
             return []
         case .complete(let sel):
             return pick(sel, universe: pending, tasks: tasks, now: now, calendar: calendar)

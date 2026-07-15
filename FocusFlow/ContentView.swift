@@ -14,6 +14,8 @@ struct ContentView: View {
     @State private var showDrawer = false
     @State private var showReentry = false
     @State private var sessionAutoStarted = false
+    // Filter to apply when the tasks list opens (set by Home voice nav "show pending").
+    @State private var tasksFilter: TaskFilter = .all
     @StateObject private var speakManager = SpeakManager()
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.modelContext) private var modelContext
@@ -40,11 +42,22 @@ struct ContentView: View {
                         guard !showBrainDump && !showReentry else { return }
                         showBrainDump = true
                     }
-                }
+                },
+                onShowTasks: { filter in
+                    tasksFilter = filter
+                    sessionAutoStarted = true
+                    navPath = [.allTasks]
+                },
+                onOpenTask: { id in
+                    tasksFilter = .all
+                    sessionAutoStarted = true
+                    navPath = [.allTasks, .taskFocus(id)]
+                },
+                canListen: navPath.isEmpty && !showBrainDump && !showReentry && !showDrawer
             )
             .navigationDestination(for: AppRoute.self) { route in
                 switch route {
-                case .allTasks:                AllTasksView()
+                case .allTasks:                AllTasksView(initialFilter: tasksFilter)
                 case .settings:               SettingsView()
                 case .taskFocus(let id):       TaskFocusView(taskID: id)
                 }
@@ -201,9 +214,29 @@ private struct HomeView: View {
     let onMicTap: () -> Void
     let onMenuTap: () -> Void
     var onFirstAppear: () -> Void = {}
+    var onShowTasks: (TaskFilter) -> Void = { _ in }
+    var onOpenTask: (PersistentIdentifier) -> Void = { _ in }
+    /// ContentView tells us when Home actually owns the foreground/mic (no sheet, drawer, or push).
+    var canListen: Bool = false
 
+    @Query(sort: \TaskItem.createdAt, order: .reverse) private var allTasks: [TaskItem]
+    @ObservedObject private var speech = SpeechManager.shared
+    @StateObject private var speaker = SpeakManager()
+    @State private var handsFree = true
+    @State private var voiceActive = false
+    @State private var actionInFlight = false
     @State private var pulse: CGFloat = 1.0
     @State private var glowOpacity: CGFloat = 0.4
+
+    private var recent: [TaskItem] { Array(allTasks.prefix(3)) }
+    private var voiceSupported: Bool {
+        #if targetEnvironment(simulator)
+        return false
+        #else
+        return true
+        #endif
+    }
+    private var listeningActive: Bool { voiceSupported && handsFree && canListen }
 
     var body: some View {
         ZStack {
@@ -233,7 +266,6 @@ private struct HomeView: View {
 
                 Spacer()
 
-                // Center content
                 VStack(spacing: 12) {
                     Text("Voxdump")
                         .font(.bdTitle()).foregroundStyle(.white)
@@ -241,48 +273,141 @@ private struct HomeView: View {
                         .font(.bdBody()).foregroundStyle(Color.bdMuted)
                 }
 
-                Spacer().frame(height: 56)
+                Spacer().frame(height: 36)
 
-                // FAB with glow rings
+                // Tap-to-capture hero (kept). Voice always-on runs in the background; this stays as
+                // the primary tap affordance.
                 ZStack {
                     Circle()
                         .fill(Color.bdPrimary.opacity(0.06))
-                        .frame(width: 260, height: 260)
+                        .frame(width: 220, height: 220)
                         .scaleEffect(pulse)
                         .animation(.easeInOut(duration: 2.2).repeatForever(autoreverses: true), value: pulse)
-
                     Circle()
                         .fill(Color.bdPrimary.opacity(0.10))
-                        .frame(width: 200, height: 200)
-
+                        .frame(width: 168, height: 168)
                     Button(action: onMicTap) {
                         ZStack {
                             Circle()
                                 .fill(Color.bdPrimary)
-                                .frame(width: 148, height: 148)
-                                .shadow(color: Color.bdPrimary.opacity(glowOpacity), radius: 36, x: 0, y: 0)
+                                .frame(width: 130, height: 130)
+                                .shadow(color: Color.bdPrimary.opacity(glowOpacity), radius: 32, x: 0, y: 0)
                                 .shadow(color: Color.bdPrimary.opacity(0.25), radius: 16, x: 0, y: 8)
                             Image(systemName: "mic.fill")
-                                .font(.system(size: 56, weight: .medium))
+                                .font(.system(size: 48, weight: .medium))
                                 .foregroundStyle(.white)
                         }
                     }
                     .buttonStyle(.plain)
                 }
                 .onAppear {
-            pulse = 1.09
-            glowOpacity = 0.65
-            onFirstAppear()
-        }
+                    pulse = 1.09
+                    glowOpacity = 0.65
+                    onFirstAppear()
+                }
+
+                if !recent.isEmpty { recentSection }
 
                 Spacer()
-
-                Text("Tap to start your vox dump")
-                    .font(.bdCaption()).foregroundStyle(Color.bdMuted2)
-                    .padding(.bottom, 48)
             }
         }
         .navigationBarHidden(true)
+        // Consistent bottom listening bar (same as the Tasks list). Always-on on device; the record
+        // mic is always tappable, even when muted.
+        .safeAreaInset(edge: .bottom) {
+            ListeningBar(
+                speech: speech,
+                voiceEnabled: voiceSupported,
+                isListening: listeningActive,
+                hint: "\u{201C}show my tasks\u{201D}, \u{201C}show pending\u{201D}, \u{201C}new task\u{201D}",
+                handsFree: $handsFree,
+                onNewDump: onMicTap
+            )
+        }
+        .onAppear { syncVoice() }
+        .onDisappear { stopVoice() }
+        .onChange(of: canListen) { _, _ in syncVoice() }
+        .onChange(of: handsFree) { _, _ in syncVoice() }
+        .onChange(of: speaker.isSpeaking) { _, speaking in if !speaking { syncVoice() } }
+        #if DEBUG
+        // QA seam: only handle injected transcripts while Home is the foreground surface, so it
+        // never double-fires with the Tasks list's observer.
+        .onReceive(NotificationCenter.default.publisher(for: .voxDebugInject)) { note in
+            if canListen, let text = note.object as? String { evaluate(text, injected: true) }
+        }
+        #endif
+    }
+
+    private var recentSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("RECENT").font(.bdMicro()).foregroundStyle(Color.bdMuted2)
+                .padding(.leading, 4)
+            ForEach(recent) { t in
+                Button { onOpenTask(t.persistentModelID) } label: {
+                    HStack(spacing: 10) {
+                        Circle().fill(t.isCompleted ? Color.bdGreen : Color.bdPrimary).frame(width: 6, height: 6)
+                        Text(t.title)
+                            .font(.bdBody()).foregroundStyle(t.isCompleted ? Color.bdMuted2 : .white)
+                            .strikethrough(t.isCompleted).lineLimit(1)
+                        Spacer()
+                        Image(systemName: "chevron.right").font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(Color.bdMuted2)
+                    }
+                    .padding(.vertical, 9).padding(.horizontal, 12)
+                    .background(Color.bdCard).clipShape(RoundedRectangle(cornerRadius: 12))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 24).padding(.top, 28)
+    }
+
+    // MARK: - Voice engine (mirrors AllTasksView; final-utterance only, no live partials)
+
+    private func syncVoice() { if listeningActive { armVoice() } else { stopVoice() } }
+
+    private func armVoice() {
+        guard listeningActive else { return }
+        voiceActive = true
+        actionInFlight = false
+        speech.stopRecording()
+        scheduleArm(0)
+    }
+
+    private func scheduleArm(_ attempt: Int) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            guard voiceActive, listeningActive, !speaker.isSpeaking else { return }
+            speech.onSilenceDetected = { evaluate(speech.transcript) }
+            do {
+                try speech.startRecording()
+                BDLog.speech.log("home: mic armed (attempt \(attempt))")
+            } catch {
+                if attempt < 2 { scheduleArm(attempt + 1) }
+            }
+        }
+    }
+
+    private func stopVoice() {
+        voiceActive = false
+        speech.stopRecording()
+    }
+
+    /// Home is voice-NAVIGATION: show/filter the list, capture, read aloud, mute. Task mutations
+    /// (complete/delete) happen on the list, where the selection context is unambiguous.
+    private func evaluate(_ text: String, injected: Bool = false) {
+        if injected { actionInFlight = false }   // QA inject (braindump://inject) runs even off-mic
+        guard injected || voiceActive, !actionInFlight else { return }
+        guard let cmd = NavCommandMatcher.match(text) else { if !injected { armVoice() }; return }
+        actionInFlight = true
+        speech.stopRecording()
+        switch cmd {
+        case .showTasks(let f): onShowTasks(f)
+        case .newDump:          onMicTap()
+        case .open:             onShowTasks(.all)   // can't reliably resolve one task from Home
+        case .readTasks:        speaker.readTasks(allTasks, filter: .pending)
+        case .mute:             handsFree = false; stopVoice()
+        default:                actionInFlight = false; armVoice()   // goBack/complete/delete/reopen: n/a here
+        }
     }
 }
 

@@ -26,6 +26,17 @@ final class VoxdumpNavCommandTests: XCTestCase {
     func test_goBack() { XCTAssertEqual(m("go back"), .goBack) }
     func test_goHome() { XCTAssertEqual(m("go home"), .goBack) }
 
+    // MARK: Show / navigate to the list (Home voice navigation)
+
+    func test_showTasks_plain() { XCTAssertEqual(m("show my tasks"), .showTasks(.all)) }
+    func test_showTasks_takeMeTo() { XCTAssertEqual(m("take me to tasks"), .showTasks(.all)) }
+    func test_showTasks_goToTasks() { XCTAssertEqual(m("go to my tasks"), .showTasks(.all)) }
+    func test_showTasks_pending() { XCTAssertEqual(m("show pending"), .showTasks(.pending)) }
+    func test_showTasks_pendingTasks() { XCTAssertEqual(m("show my pending tasks"), .showTasks(.pending)) }
+    func test_showTasks_completed() { XCTAssertEqual(m("show completed"), .showTasks(.completed)) }
+    func test_showTasks_doneTasks() { XCTAssertEqual(m("show done tasks"), .showTasks(.completed)) }
+    func test_showTasks_notReadAloud() { XCTAssertEqual(m("read my tasks"), .readTasks) }   // "read" stays readTasks
+
     // MARK: Ordinals (bug 3 — "complete 2nd task does nothing")
 
     func test_complete_first() { XCTAssertEqual(m("mark the first"), .complete(.ordinal(1))) }

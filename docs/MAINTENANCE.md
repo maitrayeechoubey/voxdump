@@ -653,3 +653,26 @@ Files: `FocusFlow/AllTasksView.swift`, `FocusFlow/FocusFlowApp.swift`, `FocusFlo
 
 Open (next): Home/main page should use the shared ListeningBar and be always-listening (currently a
 giant mic), making the note-taking-on-launch experience the consistent default.
+
+## 22. 2026-07-14 (session 9b): Home always-listening + voice navigation + list filter
+
+Per request: the main page (Home) should be always-listening with the same ListeningBar, voice-
+navigable, and keep the tap experience (Option 3 — minimal restructuring, giant mic stays).
+
+- **Home (`ContentView.HomeView`)** now runs the always-on listener (mirrors AllTasksView; final-
+  utterance only) gated by a `canListen` flag from ContentView (`navPath.isEmpty && no sheet/drawer`),
+  shows the shared `ListeningBar` at the bottom, and lists the **last 3 tasks** ("RECENT", tappable to
+  open). Home is voice-NAVIGATION: `showTasks(filter)` -> navigate, `newDump` -> capture, `readTasks`,
+  `mute`; task mutations stay on the list where selection is unambiguous.
+- **New command `NavCommand.showTasks(TaskFilter)`** (`all`/`pending`/`completed`) with matcher phrases
+  ("show my tasks", "take me to tasks", "show pending", "show completed"). On Home it navigates; on the
+  list it sets the filter.
+- **Tasks list filter**: a segmented All/Pending/Done control (tap or voice); `AllTasksView` takes an
+  `initialFilter` set by Home nav ("show pending" -> lands filtered).
+- **ListeningBar redesign**: always-visible tooltip (clues on what to say), and an always-tappable
+  record mic (a filled mic button) that works even when muted — we never remove the tap-to-record path.
+- **QA**: Home also observes the DEBUG `braindump://inject` seam (gated to when Home is foreground, so
+  it never double-fires with the list). Verified on the simulator: injecting "show completed" from Home
+  navigated to the list and selected the Done filter.
+Files: `FocusFlow/ContentView.swift`, `FocusFlow/NavCommand.swift`, `FocusFlow/AllTasksView.swift`,
+`FocusFlow/ListeningBar.swift`, `FocusFlowTests/VoxdumpNavCommandTests.swift`.

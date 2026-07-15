@@ -5,7 +5,11 @@ struct AllTasksView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \TaskItem.createdAt, order: .reverse) private var allTasks: [TaskItem]
+    /// Which slice to show on arrival; set by voice navigation from Home ("show pending"). The
+    /// segmented control and the showTasks voice command update `filter` from here on.
+    var initialFilter: TaskFilter = .all
     @State private var showBrainDump = false
+    @State private var filter: TaskFilter = .all
 
     // Hands-free (always-on) voice. Device only: the simulator forces textMode elsewhere
     // and has no usable mic, so we keep the list touch-only there.
@@ -67,12 +71,24 @@ struct AllTasksView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 24).padding(.bottom, 8)
 
+                // Filter (tap or say "show pending" / "show completed" / "show all").
+                if !allTasks.isEmpty {
+                    Picker("Filter", selection: $filter) {
+                        Text("All").tag(TaskFilter.all)
+                        Text("Pending").tag(TaskFilter.pending)
+                        Text("Done").tag(TaskFilter.completed)
+                    }
+                    .pickerStyle(.segmented)
+                    .padding(.horizontal, 24).padding(.bottom, 10)
+                }
+
                 if allTasks.isEmpty {
                     Spacer()
                     EmptyTasksState()
                     Spacer()
                 } else {
                     List {
+                        if filter != .completed {
                         ForEach(pending) { task in
                             NavigationLink(value: AppRoute.taskFocus(task.persistentModelID)) {
                                 TaskRowView(task: task)
@@ -94,8 +110,9 @@ struct AllTasksView: View {
                                 }
                             }
                         }
+                        }
 
-                        if !completed.isEmpty {
+                        if filter != .pending && !completed.isEmpty {
                             Section {
                                 ForEach(completed) { task in
                                     NavigationLink(value: AppRoute.taskFocus(task.persistentModelID)) {
@@ -167,6 +184,7 @@ struct AllTasksView: View {
         // instance first so the listener can actually record (SpeechManager seeds micGranted
         // from the system, and requesting also covers a cold first launch via the menu).
         .onAppear {
+            filter = initialFilter
             Task { @MainActor in
                 if voiceSupported { await speech.requestAuthorization() }
                 syncVoice()
@@ -279,6 +297,11 @@ struct AllTasksView: View {
 
         case .readTasks:
             speaker.readTasks(allTasks, filter: .pending)   // isSpeaking->false re-arms
+
+        case .showTasks(let f):
+            // Already on the tasks list — just apply the requested filter.
+            withAnimation { filter = f }
+            armVoice()
 
         case .open:
             if let t = resolvedTasks(cmd).first {
