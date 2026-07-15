@@ -561,3 +561,67 @@ crash fix stops the hang but the command still needs a matching task. Edit match
 (no content) returned no match, and "change the title to X save" folded the trailing "save" into the
 title instead of saving. Both are matcher-quality items, separate from the audio crash.
 Files: `FocusFlow/SpeechManager.swift`, `FocusFlow/AllTasksView.swift`, `FocusFlow/BrainDumpSheet.swift`.
+
+## 20. 2026-07-14 (session 8): tasks-command engine, permission race, shared listening bar
+
+Device logs (workspace/vox-device.logarchive, 2026-07-14) confirmed the session-7 crash fix HELD —
+10 minutes of continuous use, zero `CreateRecordingTap` exceptions, listening reliable. The remaining
+reports were almost all in COMMAND GRAMMAR + task selection, plus a launch permission race and mic-UX
+inconsistency. Fixed with proof (244 pure + 8 SwiftData integration tests, all green).
+
+### Command engine (bugs 3, 4, 6, 7) — `NavCommand.swift`
+The old grammar could only express `<verb> <name>`, so ordinals, "all", dates, and name-before-verb
+fell through to a fuzzy title match on a bogus keyword and did nothing. Logs showed `'Mark the first' ->
+complete("first")`, `'Complete all' -> complete("all")`, `'Clear all' -> delete("all")` (never reached
+confirmation because no task is named "all"), `'Call plumber is done' -> no match`.
+
+Rewrote `NavCommand` to carry a `TaskSelector` (`ordinal(n)` / `last` / `all` / `createdOn(day)` /
+`name`) instead of a raw string, added a pure `NavCommandResolver` that maps a selector to concrete
+task indices against a `TaskSnapshot` list (no SwiftData needed), and made verb dispatch
+EARLIEST-VERB-WINS so "open remove sumit paperwork" is an OPEN of the task named "remove sumit
+paperwork" (the later delete-verb "remove" is part of the name, bug 6). Selection universe by verb:
+complete/open -> PENDING only (never touches a completed task, bug 6); reopen -> completed; delete
+ordinal/name -> pending, `delete(.all)` -> the whole list. Added name-before-verb ("call plumber is
+done"). `AllTasksView.perform` now resolves via the engine and does bulk complete/delete/reopen with a
+SINGLE confirmation; `pendingDelete` became `pendingDeletes: [TaskItem]`.
+
+### Confirmation (bug 4) — `ReviewCommand.swift`
+"clear all" now actually reaches a confirmation (it resolves to `delete(.all)`), and
+`BulkDeleteConfirmMatcher` accepts natural leading affirmatives ("yes please delete", "yeah go for it")
+via a strong-lead + action-continuation rule, WITHOUT weakening any of the existing adversarial guards
+(sarcasm "yeah right", deliberation "we should proceed", the whole negation class, "ok delete", "so
+delete" all still refuse). Tests in `VoxdumpDestructiveGuardTests`.
+
+### Permission reprompt (bug 5) — `SpeechManager.swift`, `BrainDumpSheet.swift`
+Root cause (found via logs: an "Open Settings" alert shown ~1.6s after the TCC request in two launches
+where the mic then went active, i.e. permission WAS granted): `startRecording()` threw
+`.micNotAuthorized` during the launch window before the async `requestAuthorization()` re-published the
+grant, and the always-on listener re-arms on a 0.3s timer. Fix: `startRecording()` only throws a
+permission error on a DEFINITIVE denial (`authStatus == .denied/.restricted` or mic `== .denied`);
+the not-yet-resolved state throws a new retryable `.notReady`. BrainDumpSheet treats `.notReady` as a
+silent bounded retry (6 × 0.5s), never the settings alert.
+
+### Shared listening bar (UX 1, UX 2, bug 7b, bug 1 banner) — `ListeningBar.swift` (new)
+Before, every screen rolled its own indicator: center on Home, a small pill at the TOP of the Tasks
+list, tiny text at the bottom of review/edit, and the only mute was the top pill. New reusable
+`ListeningBar` bound to `SpeechManager.shared`: consistent BOTTOM placement, larger, shows the LIVE
+transcript (bug 7b — so a silent "no match" no longer reads as "not listening"), a conveniently-placed
+mute, a command tooltip, and a "+" capture button. Degrades to just "+" on the simulator / when voice
+is unsupported so tasks can still be added. Wired into AllTasksView (via `safeAreaInset(.bottom)`,
+replacing the top pill + floating FAB), CardReviewView, and EditTaskSheet (the listening banner the edit
+page was missing, bug 1).
+
+### Verification
+- `VoxdumpNavCommandTests` (58): matcher + resolver, fixtures are the real device transcripts.
+- `VoxdumpTasksCommandIntegrationTests` (8): full path against an in-memory SwiftData store — complete
+  all, complete 2nd, clear all + "yes", open multiword name, complete-by-date, name-before-verb,
+  open-prefers-pending, complete-name-completed-only-empty.
+- `VoxdumpDestructiveGuardTests` (+7): natural affirmatives confirm; guards still hold.
+- Build succeeds; sim-verified the bottom bar renders and the create→review→accept→list flow works.
+- DEVICE-ONLY (unchanged): the mic/AVAudioEngine/ASR path cannot run on the simulator (it forces text
+  mode), so the mic hardware behavior and Siri launch still need on-device confirmation. The command
+  DECISION logic — where every reported bug lived — is now proven deterministically off-device.
+Files: `FocusFlow/NavCommand.swift`, `FocusFlow/AllTasksView.swift`, `FocusFlow/ReviewCommand.swift`,
+`FocusFlow/SpeechManager.swift`, `FocusFlow/BrainDumpSheet.swift`, `FocusFlow/ListeningBar.swift`,
+`FocusFlowTests/VoxdumpNavCommandTests.swift`, `FocusFlowTests/VoxdumpTasksCommandIntegrationTests.swift`,
+`FocusFlowTests/VoxdumpDestructiveGuardTests.swift`.

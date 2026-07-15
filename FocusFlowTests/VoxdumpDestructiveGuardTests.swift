@@ -174,4 +174,16 @@ final class VoxdumpDestructiveGuardTests: XCTestCase {
     func test_okDelete_neverConfirms() { XCTAssertNil(BulkDeleteConfirmMatcher.match("ok delete")) }
     func test_yesPlease_confirms() { XCTAssertEqual(BulkDeleteConfirmMatcher.match("yes please"), .confirm) }
     func test_deleteAllOfThem_confirms() { XCTAssertEqual(BulkDeleteConfirmMatcher.match("delete all of them"), .confirm) }
+
+    // Natural leading-affirmative replies now confirm (bug 4: "yes" not accepted, user had to
+    // repeat). A strong yes-word followed only by action/affirmative words is enough; a
+    // non-action trailer ("yeah right") still fails, and every negation/sarcasm guard above holds.
+    func test_confirm_yesPleaseDelete() { XCTAssertEqual(BulkDeleteConfirmMatcher.match("yes please delete"), .confirm) }
+    func test_confirm_yeahGoForIt() { XCTAssertEqual(BulkDeleteConfirmMatcher.match("yeah go for it"), .confirm) }
+    func test_confirm_yesGetRidOfThemAll() { XCTAssertEqual(BulkDeleteConfirmMatcher.match("yes get rid of them all"), .confirm) }
+    func test_confirm_yesDeleteAllMyTasks() { XCTAssertEqual(BulkDeleteConfirmMatcher.match("yes delete all my tasks"), .confirm) }
+    func test_confirm_yep() { XCTAssertEqual(BulkDeleteConfirmMatcher.match("yep"), .confirm) }
+    // The new rule must NOT relax the sarcasm/deliberation guards.
+    func test_confirm_yeahRight_stillNeverConfirms() { XCTAssertNotEqual(BulkDeleteConfirmMatcher.match("yeah right"), .confirm) }
+    func test_confirm_yesButNotTheFirst_neverConfirms() { XCTAssertNotEqual(BulkDeleteConfirmMatcher.match("yes but not the first one"), .confirm) }
 }

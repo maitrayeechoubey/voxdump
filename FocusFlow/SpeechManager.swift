@@ -73,9 +73,20 @@ final class SpeechManager: NSObject, ObservableObject {
     }
 
     func startRecording() throws {
-        guard authStatus == .authorized else { throw SpeechError.notAuthorized }
-        guard micGranted else { throw SpeechError.micNotAuthorized }
+        // Only a DEFINITIVE denial should surface the "Open Settings" alert. During launch the
+        // async authorization request may not have resolved yet (authStatus .notDetermined or
+        // micGranted not re-published), and the always-on listener re-arms on a timer — treating
+        // that transient state as a denial was reprompting for permissions the user already
+        // granted (bug 5). Distinguish real denial from "not ready yet".
+        let micDenied: Bool = {
+            if #available(iOS 17.0, *) { return AVAudioApplication.shared.recordPermission == .denied }
+            return AVAudioSession.sharedInstance().recordPermission == .denied
+        }()
+        if authStatus == .denied || authStatus == .restricted { throw SpeechError.notAuthorized }
+        if micDenied { throw SpeechError.micNotAuthorized }
         guard let recognizer else { throw SpeechError.unavailable }
+        // Authorized-but-not-yet-resolved: retryable, never an alert.
+        guard authStatus == .authorized, micGranted else { throw SpeechError.notReady }
 
         stopRecording()
         transcript = ""
@@ -283,14 +294,15 @@ extension SpeechManager: SFSpeechRecognizerDelegate {
 }
 
 enum SpeechError: LocalizedError {
-    case notAuthorized, micNotAuthorized, unavailable
+    case notAuthorized, micNotAuthorized, unavailable, notReady
     case sessionFailed(String), engineFailed(String)
 
     var errorDescription: String? {
         switch self {
-        case .notAuthorized:         return "Speech recognition is off. Go to Settings → FocusFlow → Speech Recognition and enable it."
-        case .micNotAuthorized:      return "Microphone is off. Go to Settings → FocusFlow → Microphone and enable it."
+        case .notAuthorized:         return "Speech recognition is off. Go to Settings → Voxdump → Speech Recognition and enable it."
+        case .micNotAuthorized:      return "Microphone is off. Go to Settings → Voxdump → Microphone and enable it."
         case .unavailable:           return "Speech recognition is not available on this device."
+        case .notReady:              return "Still getting the microphone ready…"
         case .sessionFailed(let m):  return "Audio session error: \(m)"
         case .engineFailed(let m):   return "Audio engine error: \(m)"
         }

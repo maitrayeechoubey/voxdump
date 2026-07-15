@@ -36,6 +36,8 @@ struct BrainDumpSheet: View {
     }()
     @State private var manualInput = ""
     @State private var permissionAlert: SpeechError?
+    // Bounds the silent retry when the mic is not yet authorized at launch (bug 5).
+    @State private var startAttempts = 0
     /// Extracted task title -> the existing task title it duplicates, for the review-card warning.
     @State private var duplicateOf: [String: String] = [:]
     /// A pending bulk-destructive command awaiting confirmation (irreversible wipes).
@@ -154,12 +156,22 @@ struct BrainDumpSheet: View {
     }
 
     private func startRecording() {
-        print("[braindump:mic] startRecording called — auth=\(speech.authStatus.rawValue) micGranted=\(speech.micGranted)")
         do {
             speech.onSilenceDetected = stopAndProcess
             try speech.startRecording()
-            print("[braindump:mic] recording started successfully")
+            startAttempts = 0
             withAnimation { state = .recording }
+        } catch SpeechError.notReady {
+            // Authorization is still resolving right after launch. Do NOT show the "Open Settings"
+            // alert for a permission the user already granted (bug 5) — retry a few times while the
+            // async authorization request finishes publishing the grant, then quietly land on .ready.
+            withAnimation { state = .ready }
+            if startAttempts < 6 {
+                startAttempts += 1
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    if !speech.isRecording, case .ready = state { startRecording() }
+                }
+            }
         } catch let error as SpeechError {
             permissionAlert = error
             // Land on .ready (not .starting) so the alert's "Use Text Instead" button
@@ -854,17 +866,15 @@ struct CardReviewView: View {
             }
 
             if voiceEnabled {
-                HStack(spacing: 7) {
-                    Image(systemName: speech.isRecording ? "waveform" : "mic.slash.fill")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(speech.isRecording ? Color.bdGreen : Color.bdMuted2)
-                        .symbolEffect(.variableColor.iterative, isActive: speech.isRecording)
-                    Text(speech.isRecording
-                         ? "Listening… say \"accept\", \"decline\", or \"edit\""
-                         : "Say \"accept\", \"decline\", or \"edit\"")
-                        .font(.bdMicro()).foregroundStyle(Color.bdMuted2)
-                }
-                .padding(.bottom, 28)
+                ListeningBar(
+                    speech: speech,
+                    voiceEnabled: voiceEnabled,
+                    isListening: true,
+                    hint: canBrowse
+                        ? "\u{201C}accept\u{201D}, \u{201C}next\u{201D}, \u{201C}edit\u{201D}, \u{201C}decline\u{201D}"
+                        : "\u{201C}accept\u{201D}, \u{201C}edit\u{201D}, \u{201C}decline\u{201D}"
+                )
+                .padding(.bottom, 8)
             }
         }
     }
@@ -1153,12 +1163,15 @@ private struct EditTaskSheet: View {
             .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
             if voiceEnabled {
-                Text("Listening. Say \"change the title to…\", \"remove step 2\", \"add a step…\", or \"save\".")
-                    .font(.bdMicro()).foregroundStyle(Color.bdMuted2)
-                    .frame(maxWidth: .infinity)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 24)
-                    .padding(.bottom, 12)
+                // The listening banner the edit page was missing (bug 1). Same shared bar as
+                // everywhere else, so the user sees it is listening AND sees the live transcript.
+                ListeningBar(
+                    speech: SpeechManager.shared,   // EditTaskSheet has no own speech prop; use the singleton
+                    voiceEnabled: voiceEnabled,
+                    isListening: true,
+                    hint: "\u{201C}change the title to…\u{201D}, \u{201C}add a step…\u{201D}, \u{201C}remove step 2\u{201D}, \u{201C}save\u{201D}"
+                )
+                .padding(.bottom, 8)
             }
         }
         .background(Color.bdBg.ignoresSafeArea())

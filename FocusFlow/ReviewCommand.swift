@@ -87,6 +87,25 @@ enum BulkDeleteConfirmMatcher {
             "yes please", "yes absolutely", "yes definitely", "yes delete everything",
             "delete all of them", "delete all my tasks", "delete all tasks", "clear everything"
         ]
-        return confirmSet.contains(norm) ? .confirm : nil
+        if confirmSet.contains(norm) { return .confirm }
+
+        // Natural affirmative: a STRONG leading yes-word followed only by action/affirmative
+        // continuation words also confirms, so real replies ("yes please delete", "yeah go for
+        // it", "yes get rid of them all") work. Safe because negations, questions, and "n't"
+        // were already handled above, and a non-action trailer fails allSatisfy ("yeah right",
+        // "we should proceed", "oh sure ... great idea" never reach or pass this).
+        let strongLead: Set<String> = ["yes", "yeah", "yep", "yup", "ya", "yea"]
+        let continuation: Set<String> = [
+            "do", "it", "go", "ahead", "for", "delete", "them", "all", "please", "clear",
+            "wipe", "now", "confirm", "confirmed", "proceed", "definitely", "absolutely",
+            "get", "rid", "of", "everything", "sure", "ok", "okay", "the", "my", "tasks",
+            "list", "up", "them", "these", "those", "yeah", "yes"
+        ]
+        let toks = norm.split(separator: " ").map(String.init)
+        if let first = toks.first, strongLead.contains(first),
+           toks.dropFirst().allSatisfy({ continuation.contains($0) }) {
+            return .confirm
+        }
+        return nil
     }
 }

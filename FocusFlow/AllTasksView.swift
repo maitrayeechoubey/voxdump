@@ -17,7 +17,8 @@ struct AllTasksView: View {
     @State private var voiceActive = false
     @State private var actionInFlight = false
     @State private var openTaskID: PersistentIdentifier?
-    @State private var pendingDelete: TaskItem?
+    // A pending destructive confirmation can cover one task or many (bulk "clear all").
+    @State private var pendingDeletes: [TaskItem] = []
     @State private var confirmingDelete = false
 
     private var pending: [TaskItem]   { allTasks.filter { !$0.isCompleted } }
@@ -65,11 +66,6 @@ struct AllTasksView: View {
                     .font(.bdTitle()).foregroundStyle(.white)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 24).padding(.bottom, 8)
-
-                if voiceSupported {
-                    handsFreePill
-                        .padding(.horizontal, 24).padding(.bottom, 10)
-                }
 
                 if allTasks.isEmpty {
                     Spacer()
@@ -145,21 +141,22 @@ struct AllTasksView: View {
                 }
             }
 
-            // FAB (tap still works; on device the always-on listener also opens this by voice)
-            Button { showBrainDump = true } label: {
-                ZStack {
-                    Circle()
-                        .fill(Color.bdPrimary)
-                        .frame(width: 60, height: 60)
-                        .shadow(color: Color.bdPrimary.opacity(0.45), radius: 16, x: 0, y: 6)
-                    Image(systemName: "mic.fill")
-                        .font(.system(size: 24, weight: .semibold))
-                        .foregroundStyle(.white)
-                }
-            }
-            .padding(.trailing, 24).padding(.bottom, 44)
         }
         .navigationBarHidden(true)
+        // Consistent bottom listening bar (replaces the old top pill + floating mic FAB): shows
+        // the live transcript, a conveniently-placed mute, a command tooltip, and the + to capture.
+        .safeAreaInset(edge: .bottom) {
+            ListeningBar(
+                speech: speech,
+                voiceEnabled: voiceSupported,
+                isListening: listeningActive,
+                hint: confirmingDelete
+                    ? "say \u{201C}yes\u{201D} to delete, or \u{201C}no\u{201D}"
+                    : "\u{201C}complete the first\u{201D}, \u{201C}new task\u{201D}, \u{201C}clear all\u{201D}",
+                handsFree: $handsFree,
+                onNewDump: { showBrainDump = true }
+            )
+        }
         .navigationDestination(item: $openTaskID) { id in
             TaskFocusView(taskID: id)
         }
@@ -182,39 +179,6 @@ struct AllTasksView: View {
         // Arm the mic only AFTER our own speech finishes, so it never hears itself.
         .onChange(of: speaker.isSpeaking) { _, speaking in if !speaking { syncVoice() } }
         .onChange(of: speech.transcript) { _, txt in evaluate(txt, live: true) }
-    }
-
-    // MARK: - Hands-free indicator / mute toggle
-
-    private var handsFreePill: some View {
-        Button { handsFree.toggle() } label: {
-            HStack(spacing: 7) {
-                Image(systemName: pillIcon)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(handsFree ? Color.bdGreen : Color.bdMuted2)
-                    .symbolEffect(.variableColor.iterative, isActive: listeningActive && speech.isRecording)
-                Text(pillText)
-                    .font(.bdMicro()).foregroundStyle(handsFree ? Color.bdMuted : Color.bdMuted2)
-                Spacer()
-                Text(handsFree ? "Mute" : "Unmute")
-                    .font(.bdMicro()).foregroundStyle(Color.bdPrimary)
-            }
-            .padding(.horizontal, 12).padding(.vertical, 8)
-            .background(Color.bdCard)
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-        }
-        .buttonStyle(.plain)
-    }
-
-    private var pillIcon: String {
-        if !handsFree { return "mic.slash.fill" }
-        return (listeningActive && speech.isRecording) ? "waveform" : "mic.fill"
-    }
-
-    private var pillText: String {
-        guard handsFree else { return "Hands-free off" }
-        if confirmingDelete { return "Say \"yes\" to delete, or \"no\"" }
-        return "Listening — try \"open\", \"complete\", or \"new task\""
     }
 
     // MARK: - Voice engine (mirrors CardReviewView's arm/re-arm pattern)
@@ -261,11 +225,11 @@ struct AllTasksView: View {
             }
             actionInFlight = true
             speech.stopRecording()
-            if verdict == .confirm, let t = pendingDelete {
-                modelContext.delete(t)
+            if verdict == .confirm, !pendingDeletes.isEmpty {
+                pendingDeletes.forEach { modelContext.delete($0) }
                 UINotificationFeedbackGenerator().notificationOccurred(.success)
             }
-            pendingDelete = nil
+            pendingDeletes = []
             confirmingDelete = false
             armVoice()
             return
@@ -299,42 +263,59 @@ struct AllTasksView: View {
         case .readTasks:
             speaker.readTasks(allTasks, filter: .pending)   // isSpeaking->false re-arms
 
-        case .open(let hint):
-            if let t = bestMatch(hint) {
+        case .open:
+            if let t = resolvedTasks(cmd).first {
                 openTaskID = t.persistentModelID            // navigationDestination(item:) pushes
             } else {
-                notFound(hint)
+                notFound()
             }
 
-        case .complete(let hint):
-            if let t = bestMatch(hint) {
+        case .complete:
+            let targets = resolvedTasks(cmd)
+            guard !targets.isEmpty else { notFound(); return }
+            targets.forEach { t in
                 t.isCompleted = true
                 t.microSteps.forEach { $0.isCompleted = true }
-                UINotificationFeedbackGenerator().notificationOccurred(.success)
-                armVoice()
-            } else {
-                notFound(hint)
             }
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            // Speaking re-arms via speaker.isSpeaking->false; a single completion re-arms directly.
+            if targets.count > 1 { speaker.speak("Completed \(targets.count) tasks.") } else { armVoice() }
 
-        case .delete(let hint):
-            if let t = bestMatch(hint) {
-                pendingDelete = t
-                confirmingDelete = true
-                speaker.speak("Delete \(t.title)? Say yes to confirm, or no.")   // isSpeaking->false re-arms into confirm
-            } else {
-                notFound(hint)
+        case .reopen:
+            let targets = resolvedTasks(cmd)
+            guard !targets.isEmpty else { notFound(); return }
+            targets.forEach { t in
+                t.isCompleted = false
+                t.microSteps.forEach { $0.isCompleted = false }
             }
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            if targets.count > 1 { speaker.speak("Reopened \(targets.count) tasks.") } else { armVoice() }
+
+        case .delete:
+            let targets = resolvedTasks(cmd)
+            guard !targets.isEmpty else { notFound(); return }
+            pendingDeletes = targets
+            confirmingDelete = true
+            let prompt = targets.count == 1
+                ? "Delete \(targets[0].title)? Say yes to confirm, or no."
+                : "Delete \(targets.count) tasks? Say yes to confirm, or no."
+            speaker.speak(prompt)   // isSpeaking->false re-arms into the confirm listener
         }
     }
 
-    private func notFound(_ hint: String) {
-        speaker.speak("I couldn't find a task called \(hint).")   // isSpeaking->false re-arms
+    /// Resolve a command's selector to concrete tasks via the pure NavCommandResolver, using
+    /// allTasks in display order (most-recent first, matching the @Query sort). Complete/open
+    /// target pending tasks; delete targets pending (or the whole list for "clear all"); reopen
+    /// targets completed tasks — the resolver enforces this.
+    private func resolvedTasks(_ cmd: NavCommand) -> [TaskItem] {
+        let snapshot = allTasks.map {
+            TaskSnapshot(title: $0.title, isCompleted: $0.isCompleted, createdAt: $0.createdAt)
+        }
+        return NavCommandResolver.resolve(cmd, in: snapshot, now: Date()).map { allTasks[$0] }
     }
 
-    private func bestMatch(_ hint: String) -> TaskItem? {
-        let titles = allTasks.map { $0.title }
-        guard let idx = TaskMatcher.bestMatchIndex(hint: hint, titles: titles) else { return nil }
-        return allTasks[idx]
+    private func notFound() {
+        speaker.speak("I couldn't find that task.")   // isSpeaking->false re-arms
     }
 
     private func logHeard(_ text: String, cmd: NavCommand?) {
