@@ -51,7 +51,7 @@ struct FFParsedTask {
     @Guide(description: "2 to 4 immediately actionable micro-steps. Each must start with an action verb.")
     var microSteps: [String]
 
-    @Guide(description: "The exact phrase or sentence from the transcript that triggered this task extraction.")
+    @Guide(description: "The user's own words for THIS task, quoted VERBATIM: the whole sentence or clause it came from, not a single keyword and not a paraphrase. Include enough of the original wording to be a meaningful reminder.")
     var originalQuote: String
 }
 #endif
@@ -96,7 +96,7 @@ final class AIParsingManager: ObservableObject {
     - relativeTime: today/tonight/tomorrow_morning/tomorrow/this_week, or empty if none.
     - urgency: high/medium/low.
     - microSteps: 2 to 4 steps that break down HOW to do THIS task. Each is a concrete action (a verb plus an object) that moves the task forward, NOT a restatement of the title and NOT a bare time. Do NOT copy steps from these instructions or from another task, and never add a step about a subject the task did not mention (no dentist, appointment, or calendar steps unless the task is actually about that).
-    - originalQuote: the exact phrase from the transcript that triggered this task.
+    - originalQuote: the user's own words for THIS task, VERBATIM — the whole sentence or clause it came from, not a single keyword and not a paraphrase. Include enough of the original wording to be a meaningful reminder. Example: for "I really need to sort out my compensation with HR before the review cycle" the quote is that whole clause, NOT just "compensation".
     Dedup identical titles. Trailing closers ("that's it", "done", "all done") at the END are end-of-speech, not tasks, but keep them mid-sentence ("call AT&T to cancel"). On self-correction ("actually", "no wait", "scratch that", "instead", "I meant", "change it to") keep ONLY the final version ("buy milk, scratch that, almond milk" -> Buy almond milk).
     """
 

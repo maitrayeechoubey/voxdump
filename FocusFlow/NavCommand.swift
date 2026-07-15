@@ -52,10 +52,13 @@ enum NavCommandMatcher {
                    "stop voice", "hands free off", "stop hands free", "stop listen"])
             || has(["mute"]) { return .mute }
 
-        // Go back / home / close the list.
+        // Go back / home / close-dismiss the current screen (the visible X or "‹ Tasks" control).
+        // Leading "close" ("close", "close tasks", "close task page", "close this") means "leave
+        // this screen", NOT "complete a task" — completion has its own verbs below. A "close" that
+        // is not the first word (e.g. "complete close the deal") falls through to the verb loop.
         if phrase(["go back", "go home", "take me home", "back to home", "home screen"])
             || has(["home", "dismiss"])
-            || (has(["close"]) && !has(["task", "tasks"]))
+            || words.first == "close"
             || (has(["back"]) && words.count <= 2) { return .goBack }
 
         // New brain dump / add a task (routes to the existing capture flow, which uses the LLM).
@@ -92,11 +95,18 @@ enum NavCommandMatcher {
             if has(doneWords) { return .showTasks(.completed) }
             return .showTasks(.all)
         }
-        // Bare filter phrases ("show pending", "pending tasks", "show completed").
-        if phrase(["show pending", "pending tasks", "show my pending", "show incomplete",
-                   "show remaining", "show outstanding", "what's pending", "whats pending"]) { return .showTasks(.pending) }
-        if phrase(["show completed", "completed tasks", "show done", "show finished",
-                   "show my completed", "what's completed", "whats completed", "show done tasks"]) { return .showTasks(.completed) }
+        // Bare filter phrases, including natural nav phrasings ("show pending", "go to pending",
+        // "see done"). Placed before the verb loop / trailing-done parser so "go to pending" is a
+        // navigation (not "open a task named pending") and "go to done" is a navigation (not
+        // "complete <task>").
+        if phrase(["show pending", "go to pending", "see pending", "view pending", "open pending",
+                   "take me to pending", "pending tasks", "show my pending", "my pending tasks",
+                   "show incomplete", "show remaining", "show outstanding", "what's pending",
+                   "whats pending"]) { return .showTasks(.pending) }
+        if phrase(["show completed", "go to completed", "go to done", "see completed", "see done",
+                   "view completed", "view done", "open completed", "take me to done",
+                   "completed tasks", "show done", "show finished", "show my completed",
+                   "what's completed", "whats completed", "show done tasks"]) { return .showTasks(.completed) }
 
         // Reactivate / reopen a completed task. Checked before "complete" so "mark as not done"
         // and "reopen" are not swallowed by the completion verbs.
@@ -123,14 +133,21 @@ enum NavCommandMatcher {
                                         "wipe", "discard", "scrap"]
         let openVerbs: Set<String> = ["open", "show", "view", "goto", "see", "pull", "go"]
         for (i, w) in words.enumerated() {
+            let rest = Array(words[(i + 1)...])
+            if openVerbs.contains(w) {
+                // An open verb with no concrete target ("show", "show the tasks", "open my tasks",
+                // "view tasks") means "take me to the list", not "open a task named tasks". A real
+                // target ("open groceries", "show call mom") still opens that task.
+                if let sel = selectorFrom(rest: rest, text: t) { return .open(sel) }
+                return .showTasks(.all)
+            }
             let build: (TaskSelector) -> NavCommand
             if completeVerbs.contains(w) { build = NavCommand.complete }
             else if deleteVerbs.contains(w) { build = NavCommand.delete }
-            else if openVerbs.contains(w) { build = NavCommand.open }
             else { continue }
-            // Only the FIRST verb is the command; a bare verb with no target keeps listening
-            // (so "delete" alone is never destructive).
-            return selectorFrom(rest: Array(words[(i + 1)...]), text: t).map(build)
+            // Only the FIRST verb is the command; a bare complete/delete with no target keeps
+            // listening (so "delete" alone is never destructive).
+            return selectorFrom(rest: rest, text: t).map(build)
         }
         return nil
     }

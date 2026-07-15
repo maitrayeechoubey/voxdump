@@ -886,3 +886,42 @@ not just the narrow change.
 Files: `FocusFlow/FocusCommand.swift` (new), `FocusFlow/TaskFocusView.swift`, `FocusFlow/AllTasksView.swift`,
 `FocusFlow/TranscriptFilter.swift`, `FocusFlow/BrainDumpSheet.swift`, `FocusFlow/ReentryView.swift`,
 `FocusFlowTests/VoxdumpFocusCommandTests.swift` (new), `FocusFlowTests/TranscriptFilterTests.swift`.
+
+## 29. 2026-07-15 (session 12): nav-command robustness, "close" semantics, accurate quote (round-3 feedback)
+
+Device-log feedback on three issues; all fixed and sim-verified (except the AI-path quote, noted below).
+
+**Fixed — flaky navigation phrasings.** The device log showed natural phrasings misfiring in
+`NavCommandMatcher`: "go to pending" -> `open(.name("pending"))`; "go to done" -> `complete(.name("go"))`
+(via the trailing-done parser); "show the tasks" -> no match (open verb whose target is all-filler);
+"close tasks"/"close task page" -> no match (an explicit `!has(task/tasks)` guard on "close"). Fixes:
+- "go to <filter>" / "see <filter>" / "view <filter>" added to the bare-filter phrases, AHEAD of the
+  verb loop and the trailing-done parser, so filter navigation is never read as open/complete-a-task.
+- An open verb (show/view/see/open/go) with no concrete target now returns `showTasks(.all)` instead of
+  failing ("show", "show the tasks", "view tasks").
+- Leading "close" -> `goBack` regardless of "task"/"tasks"; a NON-leading "close" is still part of a
+  task name after a real verb ("complete close the deal" stays a complete).
+Sim-verified: "go to done"->showTasks(completed), "show the tasks"->showTasks(all), "go to pending"
+navigates. Note also a transient device `Audio session error: Session activation failed` arm failure in
+the log (armNext retries); recognizer/session hiccups add to the perceived flakiness independent of the
+matcher.
+
+**Decided + fixed — "close" semantics.** "close" now consistently means LEAVE THE CURRENT SCREEN (the
+visible X / "‹ Tasks" control), one level: on the task detail it returns to the list, on the list it
+returns Home. It does NOT complete a task — completion stays on "complete"/"done"/"mark complete"/
+"mark step N". Rationale: "close" maps to the dismiss affordance the user sees; overloading it with
+completion risks accidental task completion, and there are already clear completion verbs. Sim-verified:
+detail "close" -> `listen[tasks]` (back to list); list "close tasks" -> `listen[home]` (Home).
+
+**Fixed — the quote under the title was a single keyword.** `originalQuote` was minimal ("compensation"
+for a whole sentence). Fallback path (all simulators / no Apple Intelligence): `FallbackParser.makeTask`
+now keeps the source split-segment as `originalQuote` (the user's own clause, per task, no bleed across
+tasks). AI path (device): the `@Guide` + prompt for `originalQuote` now ask for the whole clause
+VERBATIM, not a keyword. Sim-verified on the fallback: "I need to sort out my compensation with HR
+before the review" -> title "Sort compensation", quote shows the FULL clause. The AI path is best-effort
+(model behavior; not reproducible on the simulator).
+
+Tests: `VoxdumpEvalTests.VoxdumpFallbackParserTests` originalQuote cases; `VoxdumpNavCommandTests`
+nav-phrasing + "close" cases. Files: `FocusFlow/NavCommand.swift`, `FocusFlow/FallbackParser.swift`,
+`FocusFlow/AIParsingManager.swift`, `FocusFlowTests/VoxdumpNavCommandTests.swift`,
+`FocusFlowTests/VoxdumpEvalTests.swift`.

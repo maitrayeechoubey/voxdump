@@ -587,6 +587,29 @@ final class VoxdumpFallbackParserTests: XCTestCase {
             XCTFail("Expected .deleteAll command")
         }
     }
+
+    // MARK: originalQuote — the quote under the title must be the user's relevant clause, not a
+    // single keyword (reported "compensation" bug). Fallback keeps the source segment verbatim.
+
+    func test_originalQuote_isTheWholeClause_notAKeyword() {
+        let dump = FallbackParser.parse(
+            transcript: "I really need to sort out my compensation with HR before the review cycle")
+        XCTAssertEqual(dump.tasks.count, 1)
+        let quote = dump.tasks.first?.originalQuote ?? ""
+        XCTAssertTrue(quote.lowercased().contains("compensation"))
+        XCTAssertTrue(quote.lowercased().contains("hr"), "quote should keep the surrounding clause")
+        XCTAssertGreaterThan(quote.split(separator: " ").count, 3, "quote must be the clause, not one keyword")
+    }
+
+    func test_originalQuote_perTask_multiSegment() {
+        let dump = FallbackParser.parse(transcript: "call the dentist and also buy groceries")
+        XCTAssertEqual(dump.tasks.count, 2)
+        XCTAssertTrue(dump.tasks.contains { ($0.originalQuote ?? "").lowercased().contains("dentist") })
+        XCTAssertTrue(dump.tasks.contains { ($0.originalQuote ?? "").lowercased().contains("groceries") })
+        let dentistQuote = dump.tasks.first { ($0.originalQuote ?? "").lowercased().contains("dentist") }?.originalQuote ?? ""
+        XCTAssertFalse(dentistQuote.lowercased().contains("groceries"),
+                       "each task keeps its OWN segment, no bleed across tasks")
+    }
 }
 
 // MARK: - VoxdumpAIParsingEvalTests

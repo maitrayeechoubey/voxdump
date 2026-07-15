@@ -423,7 +423,10 @@ enum FallbackParser {
             category: detectCategory(from: lower),
             relativeTime: extractTime(from: lower),
             urgency: extractUrgency(from: lower),
-            microSteps: generateSteps(for: title, context: lower)
+            microSteps: generateSteps(for: title, context: lower),
+            // Keep the user's own words for this task (the split segment) as the quote under the
+            // title, so it's the relevant phrase rather than a single extracted keyword.
+            originalQuote: text.trimmingCharacters(in: .whitespacesAndNewlines)
         )
     }
 

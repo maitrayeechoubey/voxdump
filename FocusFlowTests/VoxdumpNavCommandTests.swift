@@ -236,4 +236,37 @@ final class VoxdumpNavCommandTests: XCTestCase {
     func test_home_oneWordNoise_isIgnored() {
         XCTAssertEqual(home("uh", []), .ignore)
     }
+
+    // MARK: Robust nav phrasings (device-log flakiness: go-to-filter, show-the-tasks, close)
+    // These are the EXACT phrasings that misfired on device: "go to pending" opened a task named
+    // "pending", "go to done" completed a task named "go", "show the tasks" / "close tasks" no-matched.
+
+    func test_nav_goToPending()      { XCTAssertEqual(m("go to pending"), .showTasks(.pending)) }
+    func test_nav_goToDone()         { XCTAssertEqual(m("go to done"), .showTasks(.completed)) }
+    func test_nav_goToCompleted()    { XCTAssertEqual(m("go to completed"), .showTasks(.completed)) }
+    func test_nav_seePending()       { XCTAssertEqual(m("see pending"), .showTasks(.pending)) }
+    func test_nav_seeDone()          { XCTAssertEqual(m("see done"), .showTasks(.completed)) }
+    func test_nav_showThe_tasks()    { XCTAssertEqual(m("show the tasks"), .showTasks(.all)) }
+    func test_nav_show_bare()        { XCTAssertEqual(m("show"), .showTasks(.all)) }
+    // "open my tasks" reads "open" as the pending/unfinished filter (pre-existing: "open tasks" ==
+    // unfinished tasks); still a list navigation, which is the point here.
+    func test_nav_openMyTasks()      { XCTAssertEqual(m("open my tasks"), .showTasks(.pending)) }
+    func test_nav_viewTasks()        { XCTAssertEqual(m("view tasks"), .showTasks(.all)) }
+
+    // "close" = dismiss the current screen (the visible X), never "complete a task".
+    func test_close_bare()           { XCTAssertEqual(m("close"), .goBack) }
+    func test_close_tasks()          { XCTAssertEqual(m("close tasks"), .goBack) }
+    func test_close_taskPage()       { XCTAssertEqual(m("close task page"), .goBack) }
+    func test_close_thisPage()       { XCTAssertEqual(m("close this page"), .goBack) }
+    func test_close_nonLeading_isNotGoBack() {
+        // "close" mid-phrase is part of a task name after a real verb, not a dismiss.
+        guard case .complete = m("complete close the deal") else {
+            return XCTFail("leading verb 'complete' should win over a non-leading 'close'")
+        }
+    }
+
+    // Regression guards: a NAMED open/show must still open that task, "show all" still lists.
+    func test_nav_openNamed_stillOpens() { XCTAssertEqual(m("open groceries"), .open(.name("groceries"))) }
+    func test_nav_showNamed_stillOpens() { XCTAssertEqual(m("show call immigration"), .open(.name("call immigration"))) }
+    func test_nav_showAll_stillList()    { XCTAssertEqual(m("show all tasks"), .showTasks(.all)) }
 }
