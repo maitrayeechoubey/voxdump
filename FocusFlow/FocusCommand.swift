@@ -22,8 +22,13 @@ enum FocusCommandMatcher {
         func phrase(_ ps: String...) -> Bool { ps.contains { t.contains($0) } }
 
         // Return to the list. Checked first so "go back"/"back to tasks" is never read as "previous".
-        if phrase("go to tasks", "back to tasks", "task list", "show tasks", "show my tasks",
-                  "go home", "go back", "go to the list")
+        // Includes "all tasks" phrasings ("go to all tasks", "take me to all tasks", "show all
+        // tasks") — substring matching on "go to tasks" alone missed those.
+        if phrase("go to tasks", "go to all tasks", "go to my tasks", "go to the list", "go to all",
+                  "back to tasks", "back to all tasks", "back to the list", "take me to tasks",
+                  "take me to all tasks", "take me to my tasks", "take me back", "show tasks",
+                  "show all tasks", "show my tasks", "show me my tasks", "show the tasks",
+                  "task list", "the task list", "go home", "go back")
             || word("back", "close", "exit") { return .goBack }
 
         // Task-to-task navigation.

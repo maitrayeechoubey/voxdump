@@ -4,11 +4,67 @@ _Purpose: durable engineering context so any future session can support, fix, an
 app without re-deriving it. Pair this with the session-specific `HANDOFF-voice-lifecycle.md`
 (the current voice-architecture map and the change-by-change narrative)._
 
-_Last updated: 2026-07-15 (session 10). See section 27 for the latest work: the always-on listening
-lifecycle bugs 2, 3, 4 fixed (stale recognition-callback guard, Home open-task routing, and the Brain
-Dump sheet converted to the single-owner coordinator). The change-by-change narrative runs through
-section 27; older "session 2 / section 14 / handoff-voice-nav-fix.md" references in this header were
-stale (trust the numbered sections and the code)._
+_Last updated: 2026-07-15 (session 13). The change-by-change narrative runs through section 30; the
+voice work of sessions 10-13 is in sections 27-30. Older "session 2 / section 14 /
+handoff-voice-nav-fix.md" references were stale (trust the numbered sections and the code)._
+
+---
+
+## Current state & handoff (session 13, 2026-07-15)
+
+Read this first if you are a fresh session. It is the current snapshot; the numbered sections below are
+the change history, and `docs/HANDOFF-voice-lifecycle.md` is the voice-architecture map.
+
+**Repo / build / run.** iOS app; ships as **Voxdump.app**, Swift module **FocusFlow**. XcodeGen is the
+source of truth: `xcodegen generate` (or `./setup.sh`) produces `Voxdump.xcodeproj` (git-ignored; run it
+after pulling, especially when files were added). Build/test with scheme **Voxdump**:
+`xcodebuild test -project Voxdump.xcodeproj -scheme Voxdump -destination 'platform=iOS Simulator,id=<UDID>'`.
+Bundle id `com.maitrayeechoubey.braindumpapp`. (Stale `Braindump/Brainflow/FocusFlow.xcodeproj` folders
+exist; the canonical project is `Voxdump.xcodeproj` from `project.yml`.)
+
+**Voice architecture (the mental model).** `SpeechManager.shared` is the single mic owner. A single-owner
+coordinator (`listen(as:onFinal:)` / `stopListening(as:)`) with a generation counter guarantees exactly
+one active owner; owners today are `home`, `tasks`, `review`, `focus`, `reentry`. A RAW `stopRecording()`
+does NOT bump the generation, which was the root of several fixed lifecycle bugs (see §27). Command intent
+on the always-on surfaces is decided by hardcoded pure matchers (`NavCommandMatcher`, `FocusCommandMatcher`,
+`ReviewCommandMatcher`); the brain-dump capture uses the on-device LLM (`AIParsingManager`) with the
+rule-based `FallbackParser` when unavailable. See §30 for the tradeoff and the proposed hybrid.
+
+**Done, committed, and pushed to `main` (github.com/maitrayeechoubey/voxdump):**
+- §27: always-on lifecycle bugs 2 (stale-callback guard), 3 (Home open-task routing), 4 (sheet→Tasks
+  coordinator conversion) + hardening.
+- §28: task-detail voice (owner `focus`: next/previous, complete step N, complete task, go back), spoken
+  "cancel" aborts capture, reentry-screen voice.
+- §29: nav-command robustness (go-to-filter, show-the-tasks), "close" = leave the screen (detail→list,
+  list→home), accurate `originalQuote` (full clause, not a keyword).
+- §30: task-detail "go to all tasks" nav, empty/"stop" capture dismisses to the listening surface (not
+  the static ready screen), and the command-architecture note.
+
+**Open items / decisions pending:**
+1. **LLM-fallback hybrid (needs a product decision, NOT built).** The always-on matchers are hardcoded and
+   brittle; the proposal is matcher-first with an on-device-LLM fallback only on a miss. Tradeoff:
+   latency/battery on misses + a model dependency. See §30.
+2. **Residual raw-mic sites** (pre-existing, lower risk): the bulk-delete confirm loop
+   (`beginBulkConfirmVoice`/`armConfirmMic`) and the `SFSpeechRecognizerDelegate` availability handler
+   (`if !available { stopRecording() }`, no coordinator re-arm). See the §27 handoff addendum; track for a
+   §24-completion.
+
+**How to verify voice (a green build is NOT enough for lifecycle changes).** Run on device or on the sim
+with `VOX_FORCE_VOICE=1`; drive commands with the DEBUG deep link `braindump://inject?text=...` (observed
+by Home, Tasks, and TaskFocus). Grep logs (subsystem `com.braindump`) for `listen[|armed|superseded|no-op|
+heard`. The SIMULATOR HAS NO DRIVABLE MIC, so purely-spoken paths (AI-path quote quality, spoken
+"cancel"/"stop" mid-recording, the reentry >1h trigger) can only be reasoned about + unit-tested, not
+reproduced headlessly. Device `.logarchive` files in `workspace/` are the ground truth for lifecycle bugs;
+read them with `/usr/bin/log show --archive <path> --predicate 'subsystem == "com.braindump"'` (the plain
+`log` shell builtin will fail).
+
+**Tests.** Deterministic gate (run and trust this): `VoxdumpNavCommandTests`, `VoxdumpFocusCommandTests`,
+`VoxdumpEvalTests` (incl. `VoxdumpFallbackParserTests`), `TranscriptFilterTests`,
+`VoxdumpTasksCommandIntegrationTests`, `VoxdumpReviewCommandTests`, `VoxdumpEditCommandTests`,
+`VoxdumpDestructiveGuardTests`, `VoxdumpListeningBarTests` (~440 tests, all pass). **`AIFillerRuleEvalTests`
+and `VoxdumpAIParsingEvalTests` fail 13-22 tests run-to-run — EXPECTED and pre-existing**: they need Apple
+Intelligence, which the simulator lacks, so the rule fallback runs and the eval thresholds differ. They are
+flaky/environmental, NOT regressions; judge changes by the deterministic gate.
 
 ---
 
@@ -925,3 +981,35 @@ Tests: `VoxdumpEvalTests.VoxdumpFallbackParserTests` originalQuote cases; `Voxdu
 nav-phrasing + "close" cases. Files: `FocusFlow/NavCommand.swift`, `FocusFlow/FallbackParser.swift`,
 `FocusFlow/AIParsingManager.swift`, `FocusFlowTests/VoxdumpNavCommandTests.swift`,
 `FocusFlowTests/VoxdumpEvalTests.swift`.
+
+## 30. 2026-07-15 (session 13): task-detail "all tasks" nav, empty-capture landing, command-architecture note (round-4)
+
+**Fixed — "go to all tasks" / "take me to all tasks" did nothing on the task detail.** `FocusCommandMatcher`
+goBack matched by substring ("go to tasks"), which "go to ALL tasks" does not contain, so it fell through
+to nil while bare "back" worked. Added the "all tasks" / "take me to" phrasings. Sim-verified:
+`focus heard 'go to all tasks' -> goBack` -> `listen[tasks]` (back to the list).
+
+**Fixed — "stop" / empty capture stranded the user on the static big-mic ready screen.** Saying "stop"
+(or silence, or a capture that yields no tasks) dead-ended on `state = .ready`. Now: "stop"/"stop
+recording" are abort phrases (`TranscriptFilter.isAbort`), and the isStopOnly / empty-transcript /
+zero-tasks paths in `BrainDumpSheet` `dismiss()` to the always-listening surface instead of `state =
+.ready`. Sim-verified: tap-stop on an empty capture lands on Home with the RECENT tasks and the Listening
+bar, not the static screen. The INITIAL ready screen (text mode on non-voice devices, permission-alert
+paths) is unchanged.
+
+**Note — how command intent is decided (answer to "are we hardcoding these?").** Two mechanisms:
+- The ALWAYS-ON command surfaces (Home, Tasks, TaskFocus "focus", Review) use pure, rule-based matchers
+  (`NavCommandMatcher`, `FocusCommandMatcher`, `ReviewCommandMatcher`) — enumerated phrase/word lists.
+  They are instant, offline, deterministic, and unit-tested, and they fire on EVERY finalized utterance.
+- The brain-dump CAPTURE (turning a spoken dump into tasks) uses the on-device LLM (Apple Intelligence /
+  FoundationModels, `AIParsingManager`), with the rule-based `FallbackParser` when the model is absent.
+The tradeoff: the always-on matchers are chosen for speed / determinism / battery (running the LLM on
+every utterance would add latency + battery cost + a hard model dependency), but they are BRITTLE — every
+phrasing must be enumerated, which is the root of the "go to all tasks / show the tasks" flakiness. A
+future improvement (NOT yet built) is a HYBRID: keep the fast matcher as the primary path, and when it
+returns nil on a command-looking utterance, fall back to the on-device LLM to classify the intent against
+the known command set — phrasing-robustness while paying the LLM cost only on a miss, not on every
+utterance. Tracked as a design option pending a decision on the latency/battery tradeoff.
+
+Files: `FocusFlow/FocusCommand.swift`, `FocusFlow/TranscriptFilter.swift`, `FocusFlow/BrainDumpSheet.swift`,
+`FocusFlowTests/VoxdumpFocusCommandTests.swift`, `FocusFlowTests/TranscriptFilterTests.swift`.

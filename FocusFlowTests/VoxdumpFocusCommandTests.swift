@@ -23,6 +23,10 @@ final class VoxdumpFocusCommandTests: XCTestCase {
     func test_goBack_go()     { XCTAssertEqual(m("go back"), .goBack) }
     func test_goBack_toTasks(){ XCTAssertEqual(m("go to tasks"), .goBack) }
     func test_goBack_close()  { XCTAssertEqual(m("close"), .goBack) }
+    func test_goBack_goToAllTasks()    { XCTAssertEqual(m("go to all tasks"), .goBack) }
+    func test_goBack_takeMeToAllTasks(){ XCTAssertEqual(m("take me to all tasks"), .goBack) }
+    func test_goBack_showAllTasks()    { XCTAssertEqual(m("show all tasks"), .goBack) }
+    func test_goBack_goToMyTasks()     { XCTAssertEqual(m("go to my tasks"), .goBack) }
 
     // MARK: Complete a STEP by ordinal (the reported "mark first/second/third step complete")
     func test_step_completeFirst()  { XCTAssertEqual(m("complete first step"), .completeStep(1)) }

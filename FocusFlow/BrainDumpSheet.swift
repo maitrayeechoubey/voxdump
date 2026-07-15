@@ -188,11 +188,10 @@ struct BrainDumpSheet: View {
             // a partial transcript that may be incomplete or empty.
             let t = await speech.finalize()
             guard !t.trimmingCharacters(in: .whitespaces).isEmpty else {
-                // Never silently drop back to ready — on-device recognition can come back
-                // empty (model not downloaded, noise, recognizer error) and the user needs
-                // to know their note wasn't captured, not just see the screen reset.
-                speak("I didn't catch that. Try again, or switch to text instead.")
-                withAnimation { state = .ready }
+                // Nothing captured (silence, or a bare "stop"): do NOT strand the user on the static
+                // big-mic ready screen. Dismiss to the always-listening surface (Home/Tasks), which
+                // shows their tasks and the listening banner; they can retry by simply speaking.
+                dismiss()
                 return
             }
             processTranscript(t)
@@ -212,11 +211,9 @@ struct BrainDumpSheet: View {
         // the non-listening ready screen. Whole-phrase match, so a real dump that contains "cancel"
         // is unaffected. (Fixes: "say create a new task, then cancel -> stuck on the big-mic screen".)
         if TranscriptFilter.isAbort(text) { dismiss(); return }
-        guard !TranscriptFilter.isStopOnly(text) else {
-            manualInput = ""
-            withAnimation { state = .ready }
-            return
-        }
+        // A whole-transcript stop phrase ("stop", "that's it") with no task content: leave the
+        // capture and return to the listening surface, not the static big-mic ready screen.
+        guard !TranscriptFilter.isStopOnly(text) else { dismiss(); return }
         guard !text.trimmingCharacters(in: .whitespaces).isEmpty else { return }
         withAnimation { state = .processing }
         Task {
@@ -235,9 +232,10 @@ struct BrainDumpSheet: View {
                     print("[braindump:parsing] extracted \(result.tasks.count) tasks → \(unique.count) unique")
                     await MainActor.run {
                         if unique.isEmpty {
-                            // Never silently drop back to ready — tell the user nothing was captured.
-                            speak("I didn't catch any tasks. Try again.")
-                            withAnimation { state = .ready }
+                            // No actionable tasks parsed: return to the listening surface rather than
+                            // dead-ending on the static big-mic ready screen (the user expects to land
+                            // back on Home/Tasks with their list and the listening banner).
+                            dismiss()
                         } else {
                             // Flag tasks that duplicate one you already have, so the review card can
                             // warn and let you confirm rather than silently piling on duplicates.

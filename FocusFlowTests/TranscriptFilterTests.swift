@@ -247,4 +247,11 @@ final class TranscriptFilterTests: XCTestCase {
         XCTAssertFalse(TranscriptFilter.isAbort("cancel the gym membership and call mom"))
     }
     func test_abort_empty_isFalse() { XCTAssertFalse(TranscriptFilter.isAbort("")) }
+
+    // "stop" on the capture screen aborts to the listening surface; "stop" inside a real dump does not.
+    func test_abort_stop()             { XCTAssertTrue(TranscriptFilter.isAbort("stop")) }
+    func test_abort_stopRecording()    { XCTAssertTrue(TranscriptFilter.isAbort("stop recording")) }
+    func test_abort_stopInSentence_isFalse() {
+        XCTAssertFalse(TranscriptFilter.isAbort("call the bank to stop the payment"))
+    }
 }

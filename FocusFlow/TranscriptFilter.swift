@@ -48,7 +48,8 @@ enum TranscriptFilter {
         "go back", "back", "go home",
         "close", "close it", "close this",
         "forget it", "not now", "discard", "abort",
-        "exit", "quit", "stop it"
+        "exit", "quit", "stop", "stop it", "stop recording", "stop listening",
+        "nothing", "nothing else", "no thanks"
     ]
 
     /// Returns true only when the *entire* transcript is an abort/cancel signal.
