@@ -18,8 +18,6 @@ struct AllTasksView: View {
     @ObservedObject private var speech = SpeechManager.shared
     @StateObject private var speaker = SpeakManager()
     @State private var handsFree = true
-    @State private var voiceActive = false
-    @State private var actionInFlight = false
     @State private var openTaskID: PersistentIdentifier?
     // A pending destructive confirmation can cover one task or many (bulk "clear all").
     @State private var pendingDeletes: [TaskItem] = []
@@ -190,7 +188,7 @@ struct AllTasksView: View {
                 syncVoice()
             }
         }
-        .onDisappear { stopVoice() }
+        .onDisappear { speech.stopListening(as: "tasks") }
         .onChange(of: handsFree) { _, _ in syncVoice() }
         .onChange(of: showBrainDump) { _, _ in syncVoice() }
         .onChange(of: openTaskID) { _, _ in syncVoice() }
@@ -202,106 +200,60 @@ struct AllTasksView: View {
         #if DEBUG
         // QA seam: drive the real command path with an injected transcript (braindump://inject).
         .onReceive(NotificationCenter.default.publisher(for: .voxDebugInject)) { note in
-            if let text = note.object as? String { evaluate(text, live: false, injected: true) }
+            if let text = note.object as? String { evaluate(text) }
         }
         #endif
     }
 
-    // MARK: - Voice engine (mirrors CardReviewView's arm/re-arm pattern)
+    // MARK: - Voice engine (single-owner coordinator in SpeechManager — no per-view arm loop)
 
     private func syncVoice() {
-        if listeningActive { armVoice() } else { stopVoice() }
-    }
-
-    private func armVoice() {
-        guard listeningActive else { return }
-        voiceActive = true
-        actionInFlight = false
-        speech.stopRecording()
-        scheduleArm(attempt: 0)
-    }
-
-    private func scheduleArm(attempt: Int) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            guard voiceActive, listeningActive, !speaker.isSpeaking else { return }
-            speech.onSilenceDetected = { evaluate(speech.transcript, live: false) }
-            do {
-                try speech.startRecording()
-                BDLog.speech.log("tasks: mic armed (attempt \(attempt))")
-            } catch {
-                BDLog.speech.error("tasks: mic arm failed (\(attempt)): \(error.localizedDescription, privacy: .public)")
-                if attempt < 2 { scheduleArm(attempt: attempt + 1) }
-            }
+        // Listen only when this surface owns the foreground AND we're not mid-TTS (so the mic never
+        // hears our own prompts). The coordinator supersedes any other owner (Home), so the
+        // Home <-> Tasks hand-off can never run two arm loops against the shared mic.
+        if listeningActive && !speaker.isSpeaking {
+            speech.listen(as: "tasks") { text in evaluate(text) }
+        } else {
+            speech.stopListening(as: "tasks")
         }
     }
 
-    private func stopVoice() {
-        voiceActive = false
-        speech.stopRecording()
-    }
-
-    private func evaluate(_ text: String, live: Bool, injected: Bool = false) {
-        // injected == a QA transcript from the braindump://inject debug URL: run the routing even
-        // when the always-on listener is not armed (e.g. on the simulator, which has no mic).
-        if injected { actionInFlight = false }
-        guard injected || voiceActive, !actionInFlight else { return }
-        // Act ONLY on the finalized utterance (after a short silence), never a live partial.
-        // Partials like "Mark go" (mid "mark go to the gym…") were completing the first "go" task
-        // before the sentence finished — the "too fast" reaction. Live partials now only feed the
-        // on-screen transcript (the ListeningBar observes speech.transcript directly). Injected QA
-        // transcripts are already final.
-        if live && !injected { return }
-
+    /// Process one FINALIZED utterance (the coordinator only calls this after a silence, never on a
+    /// live partial, so "mark go…" can't complete the first "go" task mid-sentence).
+    private func evaluate(_ text: String) {
         // While confirming a delete, only a clear spoken yes/no is honored.
         if confirmingDelete {
-            guard let verdict = BulkDeleteConfirmMatcher.match(text) else {
-                if !live { armVoice() }
-                return
-            }
-            actionInFlight = true
-            speech.stopRecording()
+            guard let verdict = BulkDeleteConfirmMatcher.match(text) else { logHeard(text, cmd: nil); return }
             if verdict == .confirm, !pendingDeletes.isEmpty {
                 pendingDeletes.forEach { modelContext.delete($0) }
                 UINotificationFeedbackGenerator().notificationOccurred(.success)
             }
             pendingDeletes = []
             confirmingDelete = false
-            armVoice()
             return
         }
-
-        guard let cmd = NavCommandMatcher.match(text) else {
-            // Log on the finalized transcript so device logs show whether the mic is
-            // actually producing speech here (diagnostic for the "listening does nothing" report).
-            if !live { logHeard(text, cmd: nil); armVoice() }
-            return
-        }
+        guard let cmd = NavCommandMatcher.match(text) else { logHeard(text, cmd: nil); return }
         logHeard(text, cmd: cmd)
         perform(cmd)
     }
 
     private func perform(_ cmd: NavCommand) {
-        actionInFlight = true
-        speech.stopRecording()
         switch cmd {
         case .mute:
-            handsFree = false
-            stopVoice()
+            handsFree = false                 // onChange(handsFree) -> syncVoice -> stopListening
 
         case .goBack:
-            stopVoice()
+            speech.stopListening(as: "tasks")
             dismiss()
 
         case .newDump:
-            showBrainDump = true          // syncVoice stops us; BrainDumpSheet owns the mic
+            showBrainDump = true              // onChange -> syncVoice stops us; the sheet owns the mic
 
         case .readTasks:
-            speaker.readTasks(allTasks, filter: .pending)   // isSpeaking->false re-arms
+            speaker.readTasks(allTasks, filter: .pending)   // isSpeaking -> syncVoice pauses/resumes
 
         case .showTasks(let f):
-            // Already on the tasks list — just apply the requested filter.
-            withAnimation { filter = f }
-            armVoice()
+            withAnimation { filter = f }      // already on the list; coordinator auto-continues
 
         case .open:
             if let t = resolvedTasks(cmd).first {
@@ -318,8 +270,7 @@ struct AllTasksView: View {
                 t.microSteps.forEach { $0.isCompleted = true }
             }
             UINotificationFeedbackGenerator().notificationOccurred(.success)
-            // Speaking re-arms via speaker.isSpeaking->false; a single completion re-arms directly.
-            if targets.count > 1 { speaker.speak("Completed \(targets.count) tasks.") } else { armVoice() }
+            if targets.count > 1 { speaker.speak("Completed \(targets.count) tasks.") }
 
         case .reopen:
             let targets = resolvedTasks(cmd)
@@ -329,7 +280,7 @@ struct AllTasksView: View {
                 t.microSteps.forEach { $0.isCompleted = false }
             }
             UINotificationFeedbackGenerator().notificationOccurred(.success)
-            if targets.count > 1 { speaker.speak("Reopened \(targets.count) tasks.") } else { armVoice() }
+            if targets.count > 1 { speaker.speak("Reopened \(targets.count) tasks.") }
 
         case .delete:
             let targets = resolvedTasks(cmd)
@@ -339,7 +290,7 @@ struct AllTasksView: View {
             let prompt = targets.count == 1
                 ? "Delete \(targets[0].title)? Say yes to confirm, or no."
                 : "Delete \(targets.count) tasks? Say yes to confirm, or no."
-            speaker.speak(prompt)   // isSpeaking->false re-arms into the confirm listener
+            speaker.speak(prompt)             // isSpeaking -> pause; resume to hear yes/no
         }
     }
 

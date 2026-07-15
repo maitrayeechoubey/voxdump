@@ -701,3 +701,31 @@ Lesson: any always-on/mic behavior is device-only. Cover its DECISION logic with
 test (as done here), and drive the UI path with `braindump://inject` on the simulator before shipping.
 Files: `FocusFlow/ContentView.swift`, `FocusFlow/ListeningBar.swift`, `FocusFlow/BrainDumpSheet.swift`,
 `FocusFlowTests/VoxdumpListeningBarTests.swift`.
+
+## 24. 2026-07-15 (session 9d): single-owner listening coordinator (fix the arm thrash)
+
+Device log root cause (workspace/vox-device.logarchive, 06:53-06:55): "home: mic armed" and
+"tasks: mic armed" interleaved every 1-3s, and around each the audio session did rapid
+Deactivate x2 -> Activate with engine stop+pause+start. TWO per-view arm/re-arm loops (Home and the
+Tasks list) were toggling the ONE shared AVAudioSession during/after navigation; the rapid
+deactivate/reactivate spawned route-change interruptions whose resume handler restarted the engine —
+a feedback thrash. The mic never settled, so the banner said "Listening" while nothing was captured,
+and it "stopped" after going to Tasks and back (both loops fighting).
+
+Fix — a single-owner coordinator in `SpeechManager` (`listen(as:onFinal:)` / `stopListening(as:)`):
+a generation counter means a new owner supersedes the old and all stale timers/callbacks bail, so
+only ONE arm loop can ever run. `armNext` is cancellable (armWork) and settles 0.35s so a superseding
+owner cancels it before it fires. Listening auto-continues for the same owner after each finalized
+utterance. Home and AllTasksView now call listen/stopListening from `syncVoice` instead of each
+running their own `armVoice`/`scheduleArm`/`voiceActive` loop (all removed). The Brain Dump sheet
+keeps its own recording (it's a single exclusive surface; Home/Tasks stopListening while it's up).
+
+Also this session:
+- **Recent on Home shows PENDING only** (completed tasks don't belong on the landing page):
+  `recent = allTasks.filter { !isCompleted }.prefix(3)`.
+
+Verified on the simulator via `braindump://inject`: Home capture routing (spoken task -> review ->
+accept -> pending task) and nav still work; Home RECENT shows the new pending task and excludes
+completed ones. The actual on-device arm timing is device-only (the sim forces text mode), but the
+coordinator makes the two-loop race impossible by construction, and routing stays covered by 167 fast
+tests. Files: `FocusFlow/SpeechManager.swift`, `FocusFlow/AllTasksView.swift`, `FocusFlow/ContentView.swift`.

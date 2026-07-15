@@ -234,12 +234,11 @@ private struct HomeView: View {
     @ObservedObject private var speech = SpeechManager.shared
     @StateObject private var speaker = SpeakManager()
     @State private var handsFree = true
-    @State private var voiceActive = false
-    @State private var actionInFlight = false
     @State private var pulse: CGFloat = 1.0
     @State private var glowOpacity: CGFloat = 0.4
 
-    private var recent: [TaskItem] { Array(allTasks.prefix(3)) }
+    // Recent shows the last 3 PENDING tasks only — completed ones don't belong on the landing page.
+    private var recent: [TaskItem] { Array(allTasks.filter { !$0.isCompleted }.prefix(3)) }
     private var voiceSupported: Bool {
         #if targetEnvironment(simulator)
         return false
@@ -336,7 +335,7 @@ private struct HomeView: View {
             )
         }
         .onAppear { syncVoice() }
-        .onDisappear { stopVoice() }
+        .onDisappear { speech.stopListening(as: "home") }
         .onChange(of: canListen) { _, _ in syncVoice() }
         .onChange(of: handsFree) { _, _ in syncVoice() }
         .onChange(of: speaker.isSpeaking) { _, speaking in if !speaking { syncVoice() } }
@@ -344,7 +343,7 @@ private struct HomeView: View {
         // QA seam: only handle injected transcripts while Home is the foreground surface, so it
         // never double-fires with the Tasks list's observer.
         .onReceive(NotificationCenter.default.publisher(for: .voxDebugInject)) { note in
-            if canListen, let text = note.object as? String { evaluate(text, injected: true) }
+            if canListen, let text = note.object as? String { evaluate(text) }
         }
         #endif
     }
@@ -373,68 +372,35 @@ private struct HomeView: View {
         .padding(.horizontal, 24).padding(.top, 28)
     }
 
-    // MARK: - Voice engine (mirrors AllTasksView; final-utterance only, no live partials)
+    // MARK: - Voice engine (single-owner coordinator in SpeechManager — no per-view arm loop)
 
-    private func syncVoice() { if listeningActive { armVoice() } else { stopVoice() } }
-
-    private func armVoice() {
-        guard listeningActive else { return }
-        voiceActive = true
-        actionInFlight = false
-        speech.stopRecording()
-        scheduleArm(0)
-    }
-
-    private func scheduleArm(_ attempt: Int) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            guard voiceActive, listeningActive, !speaker.isSpeaking else { return }
-            speech.onSilenceDetected = { evaluate(speech.transcript) }
-            do {
-                try speech.startRecording()
-                BDLog.speech.log("home: mic armed (attempt \(attempt))")
-            } catch {
-                if attempt < 2 { scheduleArm(attempt + 1) }
-            }
+    private func syncVoice() {
+        if listeningActive && !speaker.isSpeaking {
+            speech.listen(as: "home") { text in evaluate(text) }
+        } else {
+            speech.stopListening(as: "home")
         }
     }
 
-    private func stopVoice() {
-        voiceActive = false
-        speech.stopRecording()
-    }
-
-    /// On Home a spoken phrase is EITHER a navigation command (show/read/mute/new) or a task to
-    /// capture. A recognized nav command navigates; anything else with real words is handed to the
-    /// capture sheet to parse (so "remind me to call mom" on Home is captured, not silently ignored
-    /// — the regression that made Home feel dead). Very short/no-word noise just keeps listening.
-    private func evaluate(_ text: String, injected: Bool = false) {
-        if injected { actionInFlight = false }   // QA inject (braindump://inject) runs even off-mic
-        guard injected || voiceActive, !actionInFlight else { return }
-
+    /// On Home a FINALIZED utterance is EITHER a navigation command or a task to capture. A nav
+    /// command navigates; anything else with real words is handed to the capture sheet to parse (so
+    /// "remind me to call mom" on Home is captured, not silently ignored). One-word noise is ignored.
+    private func evaluate(_ text: String) {
         if let cmd = NavCommandMatcher.match(text) {
-            actionInFlight = true
-            speech.stopRecording()
             switch cmd {
             case .showTasks(let f): onShowTasks(f)
             case .newDump:          onMicTap()
             case .open:             onShowTasks(.all)   // can't reliably resolve one task from Home
             case .readTasks:        speaker.readTasks(allTasks, filter: .pending)
-            case .mute:             handsFree = false; stopVoice()
-            default:                actionInFlight = false; armVoice()   // goBack/complete/delete/reopen: n/a here
+            case .mute:             handsFree = false   // onChange(handsFree) -> syncVoice -> stopListening
+            default:                break               // goBack/complete/delete/reopen: n/a on Home
             }
             return
         }
-
-        // Not a nav command → treat as a note to capture, if it has at least two words (so stray
-        // one-word noise doesn't pop the capture sheet).
+        // Not a nav command → capture it, if it has >= 2 words (so stray one-word noise doesn't
+        // pop the capture sheet). onCaptureText opens the sheet, which supersedes Home's listener.
         let words = text.split { !($0.isLetter || $0.isNumber) }
-        if words.count >= 2 {
-            actionInFlight = true
-            speech.stopRecording()
-            onCaptureText(text)
-        } else if !injected {
-            armVoice()
-        }
+        if words.count >= 2 { onCaptureText(text) }
     }
 }
 

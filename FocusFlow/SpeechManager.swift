@@ -21,6 +21,16 @@ final class SpeechManager: NSObject, ObservableObject {
     // Called after silenceTimeout seconds of no new words (with semantic extension). Set before startRecording().
     var onSilenceDetected: (() -> Void)?
 
+    // MARK: Single-owner always-on listening
+    // Home and the Tasks list both want hands-free listening, but there is ONE mic/session. Two
+    // per-view arm/re-arm loops raced it during navigation, thrashing the audio session (rapid
+    // deactivate/reactivate spawned route-change interruptions that restarted the engine — the
+    // "listening but nothing captured" bug). This coordinator guarantees exactly one owner: a new
+    // owner supersedes the old via a generation counter, so stale arms/callbacks bail. See §24.
+    private var listenGeneration = 0
+    private(set) var listenOwner: String?
+    private var armWork: DispatchWorkItem?
+
     // True in the last 500ms before auto-stop fires — use to show a visual countdown.
     @Published var autoStopImminent: Bool = false
 
@@ -214,6 +224,50 @@ final class SpeechManager: NSObject, ObservableObject {
         task = nil
         isRecording = false
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+    }
+
+    /// Start (or take over) always-on listening for `owner`. Supersedes any current owner so the
+    /// Home <-> Tasks hand-off can never run two arm loops against the one mic. `onFinal` fires with
+    /// the finalized transcript after each utterance; listening auto-continues for the same owner
+    /// until `stopListening(as:)` or another owner takes over. Safe to call repeatedly (idempotent
+    /// re-arm): each call is a fresh generation, and stale timers/callbacks bail on the generation.
+    func listen(as owner: String, onFinal: @escaping (String) -> Void) {
+        listenGeneration &+= 1
+        let gen = listenGeneration
+        listenOwner = owner
+        onSilenceDetected = { [weak self] in
+            guard let self, gen == self.listenGeneration else { return }
+            onFinal(self.transcript)
+            // Auto-continue for the same owner unless onFinal changed ownership (navigated / spoke).
+            if gen == self.listenGeneration { self.armNext(gen: gen, attempt: 0) }
+        }
+        armNext(gen: gen, attempt: 0)
+    }
+
+    /// Resign listening if `owner` still holds it (no-op if a newer owner already took over).
+    func stopListening(as owner: String) {
+        guard listenOwner == owner else { return }
+        listenGeneration &+= 1        // invalidate any pending arm / onSilence callback
+        listenOwner = nil
+        armWork?.cancel(); armWork = nil
+        stopRecording()
+    }
+
+    private func armNext(gen: Int, attempt: Int) {
+        armWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, gen == self.listenGeneration else { return }
+            do {
+                try self.startRecording()
+                BDLog.speech.log("listen[\(self.listenOwner ?? "?", privacy: .public)]: armed (attempt \(attempt))")
+            } catch {
+                BDLog.speech.error("listen arm failed (\(attempt)): \(error.localizedDescription, privacy: .public)")
+                if attempt < 2 { self.armNext(gen: gen, attempt: attempt + 1) }
+            }
+        }
+        armWork = work
+        // Small settle so a superseding owner's stopListening can cancel this before it fires.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
     }
 
     private func handleAudioInterruption(_ notification: Notification) {
