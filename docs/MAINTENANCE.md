@@ -749,3 +749,27 @@ Full how-to in docs/qa-voice-testing.md §4. Automated audio feed still wants a 
 (BlackHole) or a human speaking into the Mac mic; the lifecycle itself is now verifiable off-device.
 Files: `FocusFlow/SpeechManager.swift`, `FocusFlow/AllTasksView.swift`, `FocusFlow/ContentView.swift`,
 `FocusFlow/BrainDumpSheet.swift`, `docs/qa-voice-testing.md`.
+
+## 26. 2026-07-15 (session 9f): "show all tasks" fix + voice-lifecycle handoff
+
+**Fixed — bug 1: "show all tasks" opened a task.** `show` is an open-verb and `all` was parsed as a
+selector, so `"show all tasks"` matched `open(.all)` and opened pending task #1 (submit immigration).
+`NavCommandMatcher` now maps `show/view/see/list + all/everything` (without a mutate verb) to
+`showTasks(.all)`, before the open-verb dispatch. Regression guards in `VoxdumpNavCommandTests`:
+`test_showAll_*`, `test_regression_completeAll/clearAll/markAll_*` (bulk mutations unchanged), and
+`test_open_*` (open/show a NAMED task still resolves to `open(.name)`).
+
+**Open — handed off to a fresh session (see `docs/HANDOFF-voice-lifecycle.md`).** These are
+listening-lifecycle issues needing device/`VOX_FORCE_VOICE` logs to pin down:
+- Bug 2: Tasks-list listening stops after a command (e.g. "complete first"); works on first load.
+- Bug 3: on Home, "show/open <task>" goes to All Tasks instead of opening that task. Fix is known and
+  written in the handoff (HomeView `.open` should resolve via NavCommandResolver and call `onOpenTask`).
+- Bug 4: after Accept in the Brain Dump sheet lands on Tasks, listening is dead until you cross-out and
+  re-navigate. Prime suspect: the sheet's `CardReviewView`/`EditTaskSheet` still use their OWN arm loop
+  (not the §24 coordinator), so the sheet→Tasks hand-off races (sheet's onDisappear `stopRecording`
+  can kill the tasks arm). Recommended fix: convert the sheet to the coordinator too.
+
+The handoff doc has the architecture map, per-bug hypotheses + ready-to-apply code, the exact
+`VOX_FORCE_VOICE` repro steps, and the suggested order of work. Files this session:
+`FocusFlow/NavCommand.swift`, `FocusFlowTests/VoxdumpNavCommandTests.swift`,
+`docs/HANDOFF-voice-lifecycle.md`.

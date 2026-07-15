@@ -73,6 +73,16 @@ enum NavCommandMatcher {
         // the open verb so "show my tasks" navigates instead of trying to open a task called "tasks".
         let pendingWords = ["pending", "incomplete", "unfinished", "remaining", "outstanding", "to-do", "todo", "left", "open"]
         let doneWords = ["completed", "complete", "done", "finished", "checked"]
+        // "show/view/see/list all [tasks]" -> the WHOLE list, NOT "open the first task". Must beat the
+        // open-verb dispatch below (bug: "show all tasks" was matching open(.all) -> opened task #1),
+        // and must NOT fire for "complete all"/"clear all" (those lead with a complete/delete verb).
+        let mutateVerbs = ["complete", "completed", "finish", "finished", "done", "delete", "remove",
+                           "clear", "trash", "wipe", "mark", "check", "reopen", "reactivate"]
+        if has(["show", "view", "see", "list"]) && has(["all", "everything"]) && !has(mutateVerbs) {
+            if has(doneWords) { return .showTasks(.completed) }
+            if has(pendingWords) { return .showTasks(.pending) }
+            return .showTasks(.all)
+        }
         if phrase(["show tasks", "show my tasks", "show me my tasks", "show me the tasks", "my tasks",
                    "the task list", "task list", "go to tasks", "go to my tasks", "take me to tasks",
                    "take me to my tasks", "open tasks", "open my tasks", "open the task list",

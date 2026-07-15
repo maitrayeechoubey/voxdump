@@ -37,6 +37,28 @@ final class VoxdumpNavCommandTests: XCTestCase {
     func test_showTasks_doneTasks() { XCTAssertEqual(m("show done tasks"), .showTasks(.completed)) }
     func test_showTasks_notReadAloud() { XCTAssertEqual(m("read my tasks"), .readTasks) }   // "read" stays readTasks
 
+    // "show all [tasks]" must show the WHOLE list, never open task #1 (bug 1: it opened "submit
+    // immigration"). Regression guards keep "complete all"/"clear all" as bulk mutations.
+    func test_showAll_tasks() { XCTAssertEqual(m("show all tasks"), .showTasks(.all)) }
+    func test_showAll_bare() { XCTAssertEqual(m("show all"), .showTasks(.all)) }
+    func test_viewAll_tasks() { XCTAssertEqual(m("view all tasks"), .showTasks(.all)) }
+    func test_showEverything() { XCTAssertEqual(m("show everything"), .showTasks(.all)) }
+    func test_listAll() { XCTAssertEqual(m("list all tasks"), .showTasks(.all)) }
+    func test_showAll_pending() { XCTAssertEqual(m("show all pending tasks"), .showTasks(.pending)) }
+    func test_showAll_completed() { XCTAssertEqual(m("show all completed tasks"), .showTasks(.completed)) }
+    func test_showAll_notOpen() {   // the exact bug: must NOT be an open command
+        if case .open = m("show all tasks") { XCTFail("‘show all tasks’ must not open a task") }
+    }
+    func test_regression_completeAll_stillBulk() { XCTAssertEqual(m("complete all tasks"), .complete(.all)) }
+    func test_regression_clearAll_stillDelete() { XCTAssertEqual(m("clear all"), .delete(.all)) }
+    func test_regression_markAll_stillComplete() { XCTAssertEqual(m("mark all as done"), .complete(.all)) }
+
+    // Open/show a SPECIFIC task must resolve to open(name) (the experience to protect from regression).
+    func test_open_showNamedTask() { XCTAssertEqual(m("show call immigration"), .open(.name("call immigration"))) }
+    func test_open_showSubmitImmigration() { XCTAssertEqual(m("show submit immigration"), .open(.name("submit immigration"))) }
+    func test_open_openNamedTask() { XCTAssertEqual(m("open groceries"), .open(.name("groceries"))) }
+    func test_open_viewNamedTask() { XCTAssertEqual(m("view the dentist task"), .open(.name("dentist"))) }
+
     // MARK: Ordinals (bug 3 — "complete 2nd task does nothing")
 
     func test_complete_first() { XCTAssertEqual(m("mark the first"), .complete(.ordinal(1))) }
