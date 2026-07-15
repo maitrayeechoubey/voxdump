@@ -1,5 +1,22 @@
 import SwiftUI
 
+/// Pure, unit-tested decision for which trailing controls the ListeningBar shows. Extracted so the
+/// rule "while actively listening, show MUTE only — the record mic is redundant when the mic is
+/// already open; it returns only when muted or when voice can't stream" is verified headlessly
+/// (the bar itself is device-only visually). See VoxdumpListeningBarTests.
+struct ListeningBarControls: Equatable {
+    let showMute: Bool
+    let showRecordMic: Bool
+
+    static func resolve(voiceEnabled: Bool, muted: Bool,
+                        hasMuteToggle: Bool, hasRecordAction: Bool) -> ListeningBarControls {
+        ListeningBarControls(
+            showMute: voiceEnabled && hasMuteToggle,
+            showRecordMic: hasRecordAction && (!voiceEnabled || muted)
+        )
+    }
+}
+
 /// One reusable bottom "listening" bar used on every voice-enabled screen, so the mic UX is
 /// consistent everywhere: same position (bottom), same size, a LIVE transcript so the user can see
 /// what the app heard, an always-visible tooltip of example commands, a clearly-placed mute, and an
@@ -22,6 +39,10 @@ struct ListeningBar: View {
 
     private var muted: Bool { handsFree.map { !$0.wrappedValue } ?? false }
     private var hearing: Bool { voiceEnabled && isListening && speech.isRecording }
+    private var controls: ListeningBarControls {
+        .resolve(voiceEnabled: voiceEnabled, muted: muted,
+                 hasMuteToggle: handsFree != nil, hasRecordAction: onNewDump != nil)
+    }
     private var transcript: String { speech.transcript.trimmingCharacters(in: .whitespacesAndNewlines) }
     private var showTranscript: Bool { hearing && !transcript.isEmpty }
 
@@ -36,8 +57,11 @@ struct ListeningBar: View {
                     .font(.bdMicro()).foregroundStyle(Color.bdMuted2).lineLimit(1)
             }
             Spacer(minLength: 8)
-            if voiceEnabled, let handsFree { muteButton(handsFree) }
-            if let onNewDump { recordButton(onNewDump) }
+            // While actively listening, show MUTE only — a "tap to record" mic is redundant when
+            // the mic is already open. The record mic appears only when muted (so you can still tap
+            // to capture) or when voice can't stream (simulator / unsupported). See `controls`.
+            if controls.showMute, let handsFree { muteButton(handsFree) }
+            if controls.showRecordMic, let onNewDump { recordButton(onNewDump) }
         }
         .padding(.horizontal, 16).padding(.vertical, 10)
         .frame(maxWidth: .infinity)

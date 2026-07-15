@@ -676,3 +676,28 @@ navigable, and keep the tap experience (Option 3 — minimal restructuring, gian
   navigated to the list and selected the Done filter.
 Files: `FocusFlow/ContentView.swift`, `FocusFlow/NavCommand.swift`, `FocusFlow/AllTasksView.swift`,
 `FocusFlow/ListeningBar.swift`, `FocusFlowTests/VoxdumpNavCommandTests.swift`.
+
+## 23. 2026-07-14 (session 9c): fix the Home always-listening regression
+
+Two regressions from §22's Home always-listening, both device-only (the simulator forces text mode,
+so the always-on Home path never ran in sim/tests — that is why they slipped through). Diagnosed from
+the device log: the app did NOT crash/hang (scene disconnected cleanly at 23:35:20 = user closed it);
+"not responding" meant voice did nothing on Home.
+
+1. **"Nothing happens" on Home.** The Home listener was NAV-ONLY, so speaking a task
+   ("remind me to call mom") returned nil from NavCommandMatcher and silently re-armed. Fix
+   (`ContentView.HomeView.evaluate`): a recognized nav command navigates; ANY other phrase with >= 2
+   words is handed to capture via a new `onCaptureText` -> `homeDumpText` -> `BrainDumpSheet`'s new
+   `initialTranscript` (parses straight into review, no re-record). One-word noise just keeps
+   listening. So Home is now speak-to-capture OR navigate. Verified on the simulator via
+   `braindump://inject`: a spoken task from Home opened review; nav commands navigate.
+2. **Confusing "giant record mic while listening."** The `ListeningBar` showed a tap-to-record mic
+   even while actively listening. Fix: control visibility is now a pure, UNIT-TESTED function
+   `ListeningBarControls.resolve` — while listening (voice on, not muted) it shows MUTE only; the
+   record mic returns only when muted (still tap to capture) or when voice can't stream (sim).
+   `VoxdumpListeningBarTests` covers the matrix — the test that would have caught this.
+
+Lesson: any always-on/mic behavior is device-only. Cover its DECISION logic with a pure function +
+test (as done here), and drive the UI path with `braindump://inject` on the simulator before shipping.
+Files: `FocusFlow/ContentView.swift`, `FocusFlow/ListeningBar.swift`, `FocusFlow/BrainDumpSheet.swift`,
+`FocusFlowTests/VoxdumpListeningBarTests.swift`.

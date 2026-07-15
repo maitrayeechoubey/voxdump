@@ -9,6 +9,9 @@ import OSLog
 struct BrainDumpSheet: View {
     var onComplete: () -> Void = {}
     var onCommand: (ParsedDump.VoiceCommand) -> Void = { _ in }
+    /// If set, the sheet parses this transcript straight into review instead of recording — used
+    /// when the Home always-on listener heard a task and hands it off to capture.
+    var initialTranscript: String? = nil
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
@@ -110,7 +113,11 @@ struct BrainDumpSheet: View {
             }
         }
         .onAppear {
-            print("[braindump:sheet] BrainDumpSheet appeared — requesting mic and starting recording")
+            // Home handed us a spoken task — parse it straight into review, don't re-record.
+            if let seed = initialTranscript?.trimmingCharacters(in: .whitespacesAndNewlines), !seed.isEmpty {
+                processTranscript(seed)
+                return
+            }
             Task { @MainActor in
                 await speech.requestAuthorization()
                 #if !targetEnvironment(simulator)

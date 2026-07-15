@@ -16,6 +16,8 @@ struct ContentView: View {
     @State private var sessionAutoStarted = false
     // Filter to apply when the tasks list opens (set by Home voice nav "show pending").
     @State private var tasksFilter: TaskFilter = .all
+    // A task spoken on Home, handed to the capture sheet to parse (nil = normal record flow).
+    @State private var homeDumpText: String? = nil
     @StateObject private var speakManager = SpeakManager()
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.modelContext) private var modelContext
@@ -53,6 +55,12 @@ struct ContentView: View {
                     sessionAutoStarted = true
                     navPath = [.allTasks, .taskFocus(id)]
                 },
+                onCaptureText: { text in
+                    // Home heard a spoken task (not a nav command) — hand it to capture to parse.
+                    homeDumpText = text
+                    sessionAutoStarted = true
+                    showBrainDump = true
+                },
                 canListen: navPath.isEmpty && !showBrainDump && !showReentry && !showDrawer
             )
             .navigationDestination(for: AppRoute.self) { route in
@@ -63,7 +71,7 @@ struct ContentView: View {
                 }
             }
         }
-        .fullScreenCover(isPresented: $showBrainDump) {
+        .fullScreenCover(isPresented: $showBrainDump, onDismiss: { homeDumpText = nil }) {
             BrainDumpSheet(
                 onComplete: {
                     showBrainDump = false
@@ -71,7 +79,8 @@ struct ContentView: View {
                 },
                 onCommand: { command in
                     handleVoiceCommand(command)
-                }
+                },
+                initialTranscript: homeDumpText
             )
         }
         .fullScreenCover(isPresented: $showReentry) {
@@ -216,6 +225,8 @@ private struct HomeView: View {
     var onFirstAppear: () -> Void = {}
     var onShowTasks: (TaskFilter) -> Void = { _ in }
     var onOpenTask: (PersistentIdentifier) -> Void = { _ in }
+    /// A phrase heard on Home that isn't a navigation command — hand to capture to parse.
+    var onCaptureText: (String) -> Void = { _ in }
     /// ContentView tells us when Home actually owns the foreground/mic (no sheet, drawer, or push).
     var canListen: Bool = false
 
@@ -392,21 +403,37 @@ private struct HomeView: View {
         speech.stopRecording()
     }
 
-    /// Home is voice-NAVIGATION: show/filter the list, capture, read aloud, mute. Task mutations
-    /// (complete/delete) happen on the list, where the selection context is unambiguous.
+    /// On Home a spoken phrase is EITHER a navigation command (show/read/mute/new) or a task to
+    /// capture. A recognized nav command navigates; anything else with real words is handed to the
+    /// capture sheet to parse (so "remind me to call mom" on Home is captured, not silently ignored
+    /// — the regression that made Home feel dead). Very short/no-word noise just keeps listening.
     private func evaluate(_ text: String, injected: Bool = false) {
         if injected { actionInFlight = false }   // QA inject (braindump://inject) runs even off-mic
         guard injected || voiceActive, !actionInFlight else { return }
-        guard let cmd = NavCommandMatcher.match(text) else { if !injected { armVoice() }; return }
-        actionInFlight = true
-        speech.stopRecording()
-        switch cmd {
-        case .showTasks(let f): onShowTasks(f)
-        case .newDump:          onMicTap()
-        case .open:             onShowTasks(.all)   // can't reliably resolve one task from Home
-        case .readTasks:        speaker.readTasks(allTasks, filter: .pending)
-        case .mute:             handsFree = false; stopVoice()
-        default:                actionInFlight = false; armVoice()   // goBack/complete/delete/reopen: n/a here
+
+        if let cmd = NavCommandMatcher.match(text) {
+            actionInFlight = true
+            speech.stopRecording()
+            switch cmd {
+            case .showTasks(let f): onShowTasks(f)
+            case .newDump:          onMicTap()
+            case .open:             onShowTasks(.all)   // can't reliably resolve one task from Home
+            case .readTasks:        speaker.readTasks(allTasks, filter: .pending)
+            case .mute:             handsFree = false; stopVoice()
+            default:                actionInFlight = false; armVoice()   // goBack/complete/delete/reopen: n/a here
+            }
+            return
+        }
+
+        // Not a nav command → treat as a note to capture, if it has at least two words (so stray
+        // one-word noise doesn't pop the capture sheet).
+        let words = text.split { !($0.isLetter || $0.isNumber) }
+        if words.count >= 2 {
+            actionInFlight = true
+            speech.stopRecording()
+            onCaptureText(text)
+        } else if !injected {
+            armVoice()
         }
     }
 }
