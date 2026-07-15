@@ -132,7 +132,11 @@ struct BrainDumpSheet: View {
                 get: { pendingBulkDelete != nil },
                 // Any dismissal (Cancel button or tapping outside) clears the pending delete and
                 // closes the sheet without deleting. Confirm runs performBulkDelete first.
-                set: { if !$0 { confirmVoiceActive = false; speech.stopRecording(); pendingBulkDelete = nil; dismiss() } }
+                // Do NOT raw-stopRecording() here: this fires during the dialog's dismissal, and a
+                // raw stop can land after the destination (Home/Tasks) has re-armed its coordinator
+                // owner, killing that mic (the bug-4 shape). dismiss() lets the destination's
+                // listen(as:) supersede and tear this confirm recording down cleanly.
+                set: { if !$0 { confirmVoiceActive = false; pendingBulkDelete = nil; dismiss() } }
             ),
             titleVisibility: .visible,
             presenting: pendingBulkDelete
@@ -203,6 +207,11 @@ struct BrainDumpSheet: View {
     }
 
     private func processTranscript(_ text: String) {
+        // A bare "cancel"/"never mind"/"go back" (spoken or typed) aborts the dump and returns to
+        // the always-listening surface, instead of parsing it into a task and stranding the user on
+        // the non-listening ready screen. Whole-phrase match, so a real dump that contains "cancel"
+        // is unaffected. (Fixes: "say create a new task, then cancel -> stuck on the big-mic screen".)
+        if TranscriptFilter.isAbort(text) { dismiss(); return }
         guard !TranscriptFilter.isStopOnly(text) else {
             manualInput = ""
             withAnimation { state = .ready }
@@ -743,10 +752,6 @@ struct CardReviewView: View {
     // Set while an action is being applied so a trailing transcript update can't
     // fire the same command twice before the card re-arms.
     @State private var actionInFlight = false
-    // Let the audio session settle after the previous stopRecording() before we
-    // reactivate it (starting the engine immediately after deactivation throws
-    // intermittently and used to leave the mic silently dead).
-    private let reArmDelay: TimeInterval = 0.3
 
     // Swipe browses only when there is more than one card to move between; a lone
     // card is accepted/declined via the buttons or voice, so swipe would be redundant.
@@ -883,7 +888,9 @@ struct CardReviewView: View {
     private func accept() {
         guard let task = current, !actionInFlight else { return }
         actionInFlight = true
-        speech.stopRecording()
+        // Resign "review" ownership (generation-safe stop) before the card animates out and the
+        // sheet hands off to Tasks — so no dangling raw stop can kill the next owner's mic (bug 4).
+        speech.stopListening(as: "review")
         onKeep(task)
         animateOutAndRemove(.right)
     }
@@ -891,7 +898,7 @@ struct CardReviewView: View {
     private func decline() {
         guard current != nil, !actionInFlight else { return }
         actionInFlight = true
-        speech.stopRecording()
+        speech.stopListening(as: "review")
         animateOutAndRemove(.left)
     }
 
@@ -953,28 +960,20 @@ struct CardReviewView: View {
         guard voiceEnabled else { return }
         voiceActive = true
         actionInFlight = false
-        speech.stopRecording()
-        scheduleArm(attempt: 0)
-    }
-
-    private func scheduleArm(attempt: Int) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + reArmDelay) {
-            // Bail if we left review during the settle window, else we would revive a dead mic.
-            guard voiceActive, voiceEnabled else { return }
-            speech.onSilenceDetected = { evaluate(speech.transcript, live: false) }
-            do {
-                try speech.startRecording()
-                BDLog.speech.log("review: mic armed (card \(index), editing \(showEditSheet), attempt \(attempt))")
-            } catch {
-                BDLog.speech.error("review: mic arm failed (card \(index), attempt \(attempt)): \(error.localizedDescription, privacy: .public)")
-                if attempt < 2 { scheduleArm(attempt: attempt + 1) }
-            }
-        }
+        // Route through the single-owner coordinator (owner "review") instead of a private arm loop.
+        // This is what makes the review -> Tasks hand-off safe (bug 4): when AllTasksView arms
+        // listen(as:"tasks") on Accept, our later stopListening(as:"review") — including the dangling
+        // one from the dismissing sheet's onDisappear — is a no-op because we no longer own the mic,
+        // so it can't raw-stop the freshly-armed Tasks engine. Review commands still fire live via
+        // onChange(speech.transcript); onFinal handles the finalized (edit) phrase. The coordinator
+        // supplies the settle delay + retry that scheduleArm used to, and logs "listen[review]:
+        // armed" so device-log QA still greps for `listen[|armed`.
+        speech.listen(as: "review") { text in evaluate(text, live: false) }
     }
 
     private func stopVoice() {
         voiceActive = false
-        speech.stopRecording()
+        speech.stopListening(as: "review")
     }
 
     // Evaluate a (possibly partial) transcript. Review commands fire live (instantly);
@@ -1023,7 +1022,7 @@ struct CardReviewView: View {
     // actionInFlight and stops the recognizer first so a trailing partial cannot double-fire.
     private func applyEdit(_ cmd: EditCommand) {
         actionInFlight = true
-        speech.stopRecording()
+        speech.stopListening(as: "review")   // generation-safe stop; the switch re-arms via armVoice
         switch cmd {
         case .setTitle(let s):   editedTitle = s; armVoice()
         case .addStep(let s):    editedSteps.append(s); armVoice()

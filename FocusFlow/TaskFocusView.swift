@@ -11,6 +11,14 @@ struct TaskFocusView: View {
     // Slide direction for the last prev/next navigation so the content animates the right way.
     @State private var navEdge: Edge = .trailing
 
+    // Hands-free voice on the detail screen (owner "focus" in the single-owner coordinator). The
+    // Tasks list resigns "tasks" while a detail is on top (AllTasksView gates on nav depth), so this
+    // is the sole listener here and commands are scoped to THIS task (steps + task-to-task nav).
+    @ObservedObject private var speech = SpeechManager.shared
+    @State private var handsFree = true
+    private var voiceSupported: Bool { VoiceEnv.supported }
+    private var voiceActive: Bool { voiceSupported && handsFree }
+
     init(taskID: PersistentIdentifier) {
         _taskID = State(initialValue: taskID)
     }
@@ -58,6 +66,26 @@ struct TaskFocusView: View {
                     if dx > 0 { goToNext() } else { goToPrevious() }
                 }
         )
+        .safeAreaInset(edge: .bottom) {
+            if voiceSupported {
+                ListeningBar(
+                    speech: speech,
+                    voiceEnabled: voiceSupported,
+                    isListening: voiceActive,
+                    hint: "\u{201C}next\u{201D}, \u{201C}complete step 1\u{201D}, \u{201C}mark complete\u{201D}, \u{201C}go back\u{201D}",
+                    handsFree: $handsFree
+                )
+            }
+        }
+        .onAppear { syncVoice() }
+        .onDisappear { speech.stopListening(as: "focus") }
+        .onChange(of: handsFree) { _, _ in syncVoice() }
+        #if DEBUG
+        // QA seam: drive focus commands via braindump://inject while the detail is showing.
+        .onReceive(NotificationCenter.default.publisher(for: .voxDebugInject)) { note in
+            if voiceActive, let text = note.object as? String { evaluate(text) }
+        }
+        #endif
     }
 
     @ViewBuilder
@@ -302,5 +330,59 @@ struct TaskFocusView: View {
             Spacer()
         }
         .transition(.move(edge: .top).combined(with: .opacity))
+    }
+
+    // MARK: - Hands-free voice (single-owner coordinator; owner "focus")
+
+    private func syncVoice() {
+        if voiceActive {
+            speech.listen(as: "focus") { text in evaluate(text) }
+        } else {
+            speech.stopListening(as: "focus")
+        }
+    }
+
+    /// Act on a FINALIZED utterance, scoped to THIS task. Ordinals mean STEPS here (there is no
+    /// task list on this screen); "next"/"previous" move between tasks; "back" returns to the list.
+    private func evaluate(_ text: String) {
+        guard let task else { return }
+        guard let cmd = FocusCommandMatcher.match(text) else { logHeard(text, nil); return }
+        logHeard(text, cmd)
+        switch cmd {
+        case .next:     goToNext()
+        case .previous: goToPrevious()
+        case .goBack:   dismiss()
+        case .completeTask:
+            task.isCompleted = true
+            task.microSteps.forEach { $0.isCompleted = true }
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            showFeedback("Task complete!")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { dismiss() }
+        case .completeStep(let n):
+            let steps = task.microSteps.sorted { $0.order < $1.order }
+            let idx = (n == Int.max) ? steps.count - 1 : n - 1
+            guard steps.indices.contains(idx) else {
+                showFeedback(steps.isEmpty ? "No steps to complete" : "There's no step \(n)")
+                return
+            }
+            steps[idx].isCompleted = true
+            task.isCompleted = task.microSteps.allSatisfy(\.isCompleted)
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            if task.isCompleted {
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+                showFeedback("Step \(idx + 1) done — task complete!")
+            } else {
+                showFeedback("Step \(idx + 1) done")
+            }
+        }
+    }
+
+    private func logHeard(_ text: String, _ cmd: FocusCommand?) {
+        let verb = cmd.map { "\($0)" } ?? "no match"
+        #if DEBUG
+        BDLog.command.log("focus heard '\(text, privacy: .public)' -> \(verb, privacy: .public)")
+        #else
+        BDLog.command.log("focus heard '\(text, privacy: .private)' -> \(verb, privacy: .public)")
+        #endif
     }
 }

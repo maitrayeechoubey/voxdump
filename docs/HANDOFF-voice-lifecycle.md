@@ -11,6 +11,70 @@ The always-on voice listening has had repeated lifecycle regressions. The comman
 armed as the user navigates between surfaces (Home, Tasks list, Brain Dump sheet). Read "Architecture"
 then "Open bugs".
 
+## Update (2026-07-15, follow-up session): bugs 2, 3, 4 FIXED
+
+All three open bugs are fixed. The root cause of bugs 2 and 4 turned out to be the SAME class of
+defect — a **raw `stopRecording()` that tears the engine down without bumping `listenGeneration`**,
+so the coordinator keeps believing it is listening while the mic is dead. The device logarchive shows
+the signature clearly: `listen[...]: armed` is logged, then no command is ever heard again until the
+user manually re-navigates.
+
+- **Bug 4 (sheet → Tasks hand-off).** Converted `CardReviewView` from its private arm loop to the
+  coordinator: `armVoice()` → `speech.listen(as: "review") { evaluate($0, live: false) }`, and
+  `stopVoice()`/`accept()`/`decline()`/`applyEdit()` → `speech.stopListening(as: "review")`. The live
+  review-command path (`onChange(of: speech.transcript)`) is kept, so "accept"/"decline"/"save" stay
+  instant (no §17.1 regression). Now the sheet's late `onDisappear` stop is a no-op once "tasks" owns
+  the mic. **Verified on the sim** (`VOX_FORCE_VOICE=1`): the log shows `listen[tasks]: armed` then
+  `stopListening[review]: current owner is tasks — no-op`, and the Tasks screen lands with an active
+  Listening bar. `scheduleArm`/`reArmDelay` deleted (the coordinator supplies the settle + retry).
+- **Bug 2 (Tasks/Home listening dies after one command).** The real cause was NOT a SwiftData
+  re-render (that hypothesis is refuted): after a finalized command the always-on loop re-arms, but the
+  PREVIOUS recognition task's trailing result/error callback fired AFTER the re-arm and
+  `stopRecording()`-ed the fresh engine. Fix in `SpeechManager`: a per-recording token `recordingID`
+  (bumped in `stopRecording()`, captured when the task is created); the recognition callback bails if
+  it was superseded. This also stops a stale callback from overwriting `transcript` or resetting the
+  silence timer.
+- **Bug 3 (Home "open/show <task>" opened the list).** `HomeView.evaluate`'s `.open` now resolves the
+  named task against `@Query allTasks` via a new pure `HomeVoiceRouter` (in `NavCommand.swift`) and
+  calls `onOpenTask`, falling back to the list only when unresolved. Covered by 13 new deterministic
+  tests in `VoxdumpNavCommandTests` (routing decision, not just the resolver).
+
+Two DEBUG-only diagnostics were added to make these otherwise-invisible fixes greppable in device/sim
+logs: `stopListening[<owner>]: current owner is <x> — no-op` and `recognition callback superseded … bailing`.
+
+Two adjacent issues surfaced by an adversarial review of the fix were also handled:
+- **Tasks mic on the wrong surface (made voice-reachable by the bug-3 fix).** Opening a task pushes
+  `[.allTasks, .taskFocus]`, and `AllTasksView` gated its listener only on its own `openTaskID`, so the
+  "tasks" mic stayed armed under `TaskFocusView` and commands would act on the hidden list. Now gated on
+  being top of the nav stack (`AllTasksView` takes a `navPath` binding; `.onChange(of: navPath)` re-syncs).
+  Verified on the sim (no "tasks" arm on the detail; re-arms on return). Also fixes the pre-existing
+  row-tap / re-entry routes.
+- **Bulk-delete confirm-dialog dismissal** raw-`stopRecording()` (a second bug-4-shape stop) dropped; the
+  destination's `listen(as:)` supersede tears the confirm recording down cleanly.
+
+**Known residual raw-mic sites (pre-existing, lower-risk, NOT reproductions of the reported bugs):**
+the Brain Dump *capture* one-shot (`startRecording`/`stopAndProcess`/`finalize` — needs a single
+`finalize`, not auto-continue, so it stays raw), the rest of the bulk-confirm loop
+(`beginBulkConfirmVoice`/`armConfirmMic`), and the `SFSpeechRecognizerDelegate` availability handler
+(`if !available { stopRecording() }`, no coordinator re-arm on an availability blip). Track for a
+future §-completion of §24.
+
+## Round 2 (2026-07-15, session 11): follow-up device feedback
+
+Three issues reported after the above shipped; see MAINTENANCE §28 for detail.
+- **Task-detail voice** (a regression from the fix above): gating the "tasks" mic off the detail screen
+  left it silent. Added a detail-scoped listener — `FocusCommand`/`FocusCommandMatcher` + `TaskFocusView`
+  as coordinator owner "focus" (next / previous, complete step N, complete task, go back) with a
+  ListeningBar. Sim-verified (`listen[focus]: armed`; "complete first step" → step 1 checked; "go back" →
+  `listen[tasks]` re-arms).
+- **Capture "cancel"**: `TranscriptFilter.isAbort` + `BrainDumpSheet.processTranscript` dismisses on a
+  bare "cancel" / "never mind" / "go back" instead of parsing it and stranding on the ready (big-mic)
+  screen.
+- **Reentry voice**: `ReentryView` (the ">1h idle + incomplete tasks" welcome-back screen; opened by
+  `checkReentry`) now listens as owner "reentry" (continue / go home).
+
+Coordinator owners are now: `home`, `tasks`, `review`, `focus`, `reentry`. Only one is ever active.
+
 ## Architecture (voice)
 
 - **One mic, one owner.** `SpeechManager.shared` (FocusFlow/SpeechManager.swift) is the single

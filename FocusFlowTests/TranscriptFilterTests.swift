@@ -229,4 +229,22 @@ final class TranscriptFilterTests: XCTestCase {
     func test_whitespaceOnly_isNotStop() {
         XCTAssertFalse(TranscriptFilter.isStopOnly("   "))
     }
+
+    // MARK: - isAbort: a bare "cancel"/"go back" on the capture screen dismisses to the
+    // listening surface, but a real dump that merely CONTAINS "cancel" must be parsed, not dropped.
+
+    func test_abort_cancel()      { XCTAssertTrue(TranscriptFilter.isAbort("cancel")) }
+    func test_abort_neverMind()   { XCTAssertTrue(TranscriptFilter.isAbort("never mind")) }
+    func test_abort_goBack()      { XCTAssertTrue(TranscriptFilter.isAbort("go back")) }
+    func test_abort_close()       { XCTAssertTrue(TranscriptFilter.isAbort("close")) }
+    func test_abort_punctuation() { XCTAssertTrue(TranscriptFilter.isAbort("Cancel.")) }
+    func test_abort_caseInsensitive() { XCTAssertTrue(TranscriptFilter.isAbort("Never Mind")) }
+
+    func test_abort_notARealDump_subscription() {
+        XCTAssertFalse(TranscriptFilter.isAbort("cancel my subscription"))
+    }
+    func test_abort_notARealDump_sentence() {
+        XCTAssertFalse(TranscriptFilter.isAbort("cancel the gym membership and call mom"))
+    }
+    func test_abort_empty_isFalse() { XCTAssertFalse(TranscriptFilter.isAbort("")) }
 }

@@ -65,7 +65,7 @@ struct ContentView: View {
             )
             .navigationDestination(for: AppRoute.self) { route in
                 switch route {
-                case .allTasks:                AllTasksView(initialFilter: tasksFilter)
+                case .allTasks:                AllTasksView(initialFilter: tasksFilter, navPath: $navPath)
                 case .settings:               SettingsView()
                 case .taskFocus(let id):       TaskFocusView(taskID: id)
                 }
@@ -380,21 +380,19 @@ private struct HomeView: View {
     /// command navigates; anything else with real words is handed to the capture sheet to parse (so
     /// "remind me to call mom" on Home is captured, not silently ignored). One-word noise is ignored.
     private func evaluate(_ text: String) {
-        if let cmd = NavCommandMatcher.match(text) {
-            switch cmd {
-            case .showTasks(let f): onShowTasks(f)
-            case .newDump:          onMicTap()
-            case .open:             onShowTasks(.all)   // can't reliably resolve one task from Home
-            case .readTasks:        speaker.readTasks(allTasks, filter: .pending)
-            case .mute:             handsFree = false   // onChange(handsFree) -> syncVoice -> stopListening
-            default:                break               // goBack/complete/delete/reopen: n/a on Home
-            }
-            return
+        // Pure routing decision (unit-tested via HomeVoiceRouter). A named "open/show <task>" now
+        // resolves against Home's own task list and opens that task — HomeView has @Query allTasks,
+        // so it can resolve just like the Tasks page instead of dumping to the full list (bug 3).
+        let snap = allTasks.map { TaskSnapshot(title: $0.title, isCompleted: $0.isCompleted, createdAt: $0.createdAt) }
+        switch HomeVoiceRouter.outcome(for: text, tasks: snap) {
+        case .showTasks(let f): onShowTasks(f)
+        case .openTask(let i):  onOpenTask(allTasks[i].persistentModelID)   // pushes [.allTasks, .taskFocus(id)]
+        case .newDump:          onMicTap()
+        case .readTasks:        speaker.readTasks(allTasks, filter: .pending)
+        case .mute:             handsFree = false          // onChange(handsFree) -> syncVoice -> stopListening
+        case .capture(let t):   onCaptureText(t)           // opens the sheet, which supersedes Home's listener
+        case .ignore:           break                      // goBack/complete/delete/reopen or one-word noise
         }
-        // Not a nav command → capture it, if it has >= 2 words (so stray one-word noise doesn't
-        // pop the capture sheet). onCaptureText opens the sheet, which supersedes Home's listener.
-        let words = text.split { !($0.isLetter || $0.isNumber) }
-        if words.count >= 2 { onCaptureText(text) }
     }
 }
 

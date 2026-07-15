@@ -293,3 +293,51 @@ enum NavCommandResolver {
         }
     }
 }
+
+// MARK: - Home routing
+
+/// The outcome of a finalized utterance heard on the Home screen. Pure and Equatable so the
+/// Home <-> task-list routing is unit-testable without SwiftUI — in particular bug 3: a named
+/// "open/show <task>" on Home must open that task, not dump to the full list.
+enum HomeVoiceOutcome: Equatable {
+    case showTasks(TaskFilter)   // navigate to / filter the task list
+    case openTask(Int)           // open one task: index into the display-ordered tasks passed in
+    case newDump                 // open the capture sheet
+    case readTasks               // speak the pending tasks
+    case mute                    // stop hands-free listening
+    case capture(String)         // not a command — hand the phrase to capture to parse
+    case ignore                  // one-word noise, or a command with no meaning on Home
+}
+
+enum HomeVoiceRouter {
+    /// Decide what a finalized Home utterance should do, given the Home task list IN DISPLAY ORDER
+    /// (most-recent first, matching HomeView's @Query sort). A named open/show resolves against that
+    /// list via NavCommandResolver and yields .openTask(index); an unresolved name falls back to the
+    /// full list (today's behavior for phrases we can't map to a task). This is exactly what
+    /// AllTasksView.perform already does for .open — Home was the only surface ignoring the resolver.
+    static func outcome(for text: String, tasks: [TaskSnapshot], now: Date = Date()) -> HomeVoiceOutcome {
+        if let cmd = NavCommandMatcher.match(text) {
+            switch cmd {
+            case .showTasks(let f):
+                return .showTasks(f)
+            case .newDump:
+                return .newDump
+            case .open(let sel):
+                if let i = NavCommandResolver.resolve(.open(sel), in: tasks, now: now).first {
+                    return .openTask(i)
+                }
+                return .showTasks(.all)              // couldn't resolve a single task — show the list
+            case .readTasks:
+                return .readTasks
+            case .mute:
+                return .mute
+            case .goBack, .complete, .delete, .reopen:
+                return .ignore                       // not meaningful on Home
+            }
+        }
+        // Not a nav command → capture it, if it has >= 2 words (stray one-word noise is ignored so
+        // it doesn't pop the capture sheet).
+        let words = text.split { !($0.isLetter || $0.isNumber) }
+        return words.count >= 2 ? .capture(text) : .ignore
+    }
+}

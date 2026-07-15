@@ -11,6 +11,13 @@ struct ReentryView: View {
         order: .reverse
     ) private var incompleteTasks: [TaskItem]
 
+    // Voice on the "welcome back" screen (owner "reentry"). Home resigns its mic while this cover is
+    // up (canListen is false when showReentry), so this is the sole listener.
+    @ObservedObject private var speech = SpeechManager.shared
+    @State private var handsFree = true
+    private var voiceSupported: Bool { VoiceEnv.supported }
+    private var voiceActive: Bool { voiceSupported && handsFree }
+
     private var primaryTask: TaskItem? {
         incompleteTasks.first(where: { $0.isInProgress }) ?? incompleteTasks.first
     }
@@ -79,6 +86,52 @@ struct ReentryView: View {
                     .padding(.horizontal, 24).padding(.bottom, 48)
                 }
             }
+        }
+        .safeAreaInset(edge: .bottom) {
+            if voiceSupported {
+                ListeningBar(
+                    speech: speech,
+                    voiceEnabled: voiceSupported,
+                    isListening: voiceActive,
+                    hint: "\u{201C}continue\u{201D}, \u{201C}go home\u{201D}",
+                    handsFree: $handsFree
+                )
+            }
+        }
+        .onAppear { syncVoice() }
+        .onDisappear { speech.stopListening(as: "reentry") }
+        .onChange(of: handsFree) { _, _ in syncVoice() }
+        #if DEBUG
+        .onReceive(NotificationCenter.default.publisher(for: .voxDebugInject)) { note in
+            if voiceActive, let text = note.object as? String { evaluate(text) }
+        }
+        #endif
+    }
+
+    // MARK: - Hands-free voice (owner "reentry")
+
+    private func syncVoice() {
+        if voiceActive {
+            speech.listen(as: "reentry") { text in evaluate(text) }
+        } else {
+            speech.stopListening(as: "reentry")
+        }
+    }
+
+    private func evaluate(_ text: String) {
+        let t = text.lowercased()
+        let words = Set(t.split { !($0.isLetter || $0.isNumber) }.map(String.init))
+        func word(_ ws: String...) -> Bool { ws.contains { words.contains($0) } }
+        func phrase(_ ps: String...) -> Bool { ps.contains { t.contains($0) } }
+        // Dismiss checked first, so "no thanks" / "not now" never reads as continue.
+        if word("dismiss", "no", "nope", "close", "cancel", "skip", "later")
+            || phrase("go home", "not now", "never mind", "nevermind", "go away") {
+            onDismiss(); return
+        }
+        if let task = primaryTask,
+           word("continue", "resume", "yes", "yeah", "yep", "go", "keep", "open", "start")
+            || phrase("keep going", "pick up", "pick it up", "let's go", "lets go", "continue task") {
+            onContinue(task); return
         }
     }
 

@@ -34,4 +34,29 @@ enum TranscriptFilter {
             .lowercased()
         return exactStopPhrases.contains(normalized)
     }
+
+    // MARK: - Abort phrase detection
+
+    /// Phrases that, when they ARE the entire transcript on the capture screen, mean "cancel this,
+    /// take me back" — so a spoken "cancel" dismisses the brain dump and returns to the
+    /// always-listening surface instead of being parsed into a task and stranding the user on the
+    /// non-listening ready screen. Whole-transcript match only, so a real dump that merely CONTAINS
+    /// "cancel" ("cancel my subscription") is unaffected.
+    static let exactAbortPhrases: Set<String> = [
+        "cancel", "cancel that", "cancel this",
+        "never mind", "nevermind",
+        "go back", "back", "go home",
+        "close", "close it", "close this",
+        "forget it", "not now", "discard", "abort",
+        "exit", "quit", "stop it"
+    ]
+
+    /// Returns true only when the *entire* transcript is an abort/cancel signal.
+    static func isAbort(_ raw: String) -> Bool {
+        let normalized = raw
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: .punctuationCharacters)
+            .lowercased()
+        return exactAbortPhrases.contains(normalized)
+    }
 }

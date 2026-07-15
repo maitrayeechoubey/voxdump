@@ -55,6 +55,14 @@ final class SpeechManager: NSObject, ObservableObject {
     private let engine = AVAudioEngine()
     private var silenceWorkItem: DispatchWorkItem?
     private var silenceExtended = false   // true after one semantic extension
+    // Bumped on every teardown. The recognition-task callback captures this value when the task is
+    // created and bails if it changed, so a stale callback from a just-superseded utterance can no
+    // longer stopRecording()/resetSilenceTimer() the freshly re-armed engine. That silent kill was
+    // the "listening dies after one command" bug (bug 2): the always-on loop re-arms after a
+    // finalized utterance, but the previous recognition task's trailing error/final callback fired
+    // AFTER the re-arm and tore the new engine down via a raw stopRecording() — which never bumps
+    // listenGeneration, so the coordinator believed it was still listening and never re-armed.
+    private var recordingID = 0
 
     // Continuation waiting for isFinal — set by finalize(), resolved by the recognition callback.
     private var finalizeContinuation: CheckedContinuation<String, Never>?
@@ -162,9 +170,20 @@ final class SpeechManager: NSObject, ObservableObject {
 
         isRecording = true
 
+        let rid = recordingID
         task = recognizer.recognitionTask(with: req) { [weak self] result, error in
             Task { @MainActor [weak self] in
+                // Bail if this recording was superseded (re-armed or stopped) while this callback
+                // was in flight — otherwise a stale utterance's trailing result/error would mutate
+                // transcript, reset the silence timer, or stopRecording() the engine that a newer
+                // recording now owns. See recordingID.
                 guard let self else { return }
+                guard rid == self.recordingID else {
+                    #if DEBUG
+                    BDLog.speech.log("recognition callback superseded (rid \(rid) != cur \(self.recordingID)) — bailing")
+                    #endif
+                    return
+                }
                 if let result {
                     let text = result.bestTranscription.formattedString
                     if text != self.transcript {
@@ -219,6 +238,18 @@ final class SpeechManager: NSObject, ObservableObject {
     }
 
     func stopRecording() {
+        // Supersede the current recording so any in-flight recognition callback from it bails
+        // (recordingID) instead of tearing down whatever engine is armed next.
+        recordingID &+= 1
+        // If a finalize() is parked, resolve it now with what we have rather than making it wait
+        // for its 2s fallback — a superseding stop (interruption, availability, re-arm) should
+        // unblock the brain-dump capture promptly. didFinalize guards against a double-resume
+        // (the normal isFinal/error paths already resolved and niled the continuation).
+        if !didFinalize, let cont = finalizeContinuation {
+            didFinalize = true
+            finalizeContinuation = nil
+            cont.resume(returning: transcript)
+        }
         cancelSilenceTimer()
         if let observer = interruptionObserver {
             NotificationCenter.default.removeObserver(observer)
@@ -261,7 +292,17 @@ final class SpeechManager: NSObject, ObservableObject {
 
     /// Resign listening if `owner` still holds it (no-op if a newer owner already took over).
     func stopListening(as owner: String) {
-        guard listenOwner == owner else { return }
+        guard listenOwner == owner else {
+            #if DEBUG
+            // A stop from a surface that no longer owns the mic (e.g. the Brain Dump sheet's
+            // onDisappear firing after Tasks already took over) must be a no-op — otherwise it
+            // would raw-stop the new owner's freshly-armed engine (bug 4).
+            if let current = listenOwner, current != owner {
+                BDLog.speech.log("stopListening[\(owner)]: current owner is \(current) — no-op")
+            }
+            #endif
+            return
+        }
         listenGeneration &+= 1        // invalidate any pending arm / onSilence callback
         listenOwner = nil
         armWork?.cancel(); armWork = nil

@@ -1,12 +1,14 @@
 # Voxdump / FocusFlow — Maintenance & Enhancement Guide
 
 _Purpose: durable engineering context so any future session can support, fix, and extend this
-app without re-deriving it. Pair this with the session-specific `handoff-voice-nav-fix.md`
-(which has the ship/distribution steps and the change-by-change narrative)._
+app without re-deriving it. Pair this with the session-specific `HANDOFF-voice-lifecycle.md`
+(the current voice-architecture map and the change-by-change narrative)._
 
-_Last updated: 2026-07-13 (session 2). See section 14 for the latest work: task-detail swipe nav,
-review/edit voice reliability, the delete-all data-loss fix, and bulk-delete confirmation (tap + voice).
-Section 14 also carries the current open items and the on-device install command._
+_Last updated: 2026-07-15 (session 10). See section 27 for the latest work: the always-on listening
+lifecycle bugs 2, 3, 4 fixed (stale recognition-callback guard, Home open-task routing, and the Brain
+Dump sheet converted to the single-owner coordinator). The change-by-change narrative runs through
+section 27; older "session 2 / section 14 / handoff-voice-nav-fix.md" references in this header were
+stale (trust the numbered sections and the code)._
 
 ---
 
@@ -773,3 +775,114 @@ The handoff doc has the architecture map, per-bug hypotheses + ready-to-apply co
 `VOX_FORCE_VOICE` repro steps, and the suggested order of work. Files this session:
 `FocusFlow/NavCommand.swift`, `FocusFlowTests/VoxdumpNavCommandTests.swift`,
 `docs/HANDOFF-voice-lifecycle.md`.
+
+## 27. 2026-07-15 (session 10): voice-lifecycle bugs 2, 3, 4 fixed (+ review hardening)
+
+Closes the three open items from §26 / `docs/HANDOFF-voice-lifecycle.md`. Grounded in a real device
+logarchive supplied this session. Root cause of bugs 2 and 4 is the SAME defect class: a raw
+`stopRecording()` tears the engine down WITHOUT bumping `listenGeneration`, so the single-owner
+coordinator (§24) keeps believing it is listening while the mic is dead. The log signature is
+unmistakable — `listen[...]: armed` is logged, then no command is heard again until the user manually
+re-navigates.
+
+**Fixed — bug 4: sheet → Tasks hand-off killed the mic.** `CardReviewView` was the last hold-out still
+driving the raw engine (`armVoice`/`scheduleArm`/`stopVoice` → raw `startRecording()/stopRecording()`).
+On Accept, its `onDisappear` → `stopVoice` → raw `stopRecording()` fired during the sheet dismissal,
+AFTER `AllTasksView` armed `listen(as:"tasks")`, killing it. Converted `CardReviewView` to the
+coordinator: `armVoice()` → `speech.listen(as:"review") { evaluate($0, live:false) }`; `stopVoice()`,
+`accept()`, `decline()`, `applyEdit()` → `speech.stopListening(as:"review")`. The live review-command
+path (`onChange(of: speech.transcript)`) is kept, so "accept"/"decline"/"save" stay instant (no §17.1
+regression). The late `onDisappear` stop is now a generation-guarded no-op once "tasks" owns the mic.
+`scheduleArm`/`reArmDelay` deleted (the coordinator supplies the 0.35s settle + retry). Verified on the
+sim: `listen[tasks]: armed` then `stopListening[review]: current owner is tasks — no-op`, and the Tasks
+screen lands with an active Listening bar.
+
+**Fixed — bug 2: Tasks/Home listening died after one command.** NOT a SwiftData re-render (that
+hypothesis is refuted). After a finalized command the always-on loop re-arms, but the PREVIOUS
+recognition task's trailing result/error callback fires AFTER the re-arm and `stopRecording()`s the
+fresh engine. `SpeechManager` now carries a per-recording token `recordingID` (bumped in
+`stopRecording()`, captured when the task is created); the recognition callback bails if superseded, so
+a stale callback can no longer stop/reset/overwrite the newer recording. `stopRecording()` also resolves
+a parked `finalize()` continuation immediately (a superseding stop used to leave capture waiting on its
+2s fallback).
+
+**Fixed — bug 3: Home "open/show <task>" opened the list.** `HomeView.evaluate`'s `.open` now resolves
+the named task against `@Query allTasks` through a new pure `HomeVoiceRouter` (in `NavCommand.swift`) and
+calls `onOpenTask`, falling back to the list only when unresolved — mirroring what `AllTasksView.perform`
+already did. 13 new deterministic tests in `VoxdumpNavCommandTests` cover the Home ROUTING decision (a
+resolver-only test would pass even with the bug present, since the resolver was never wrong — Home was
+ignoring it).
+
+**Hardening from an adversarial review of the fix:**
+- The bug-3 fix made a pre-existing defect newly voice-reachable: opening a task pushes
+  `[.allTasks, .taskFocus]`, and `AllTasksView` gated its listener only on its own `openTaskID`, so the
+  "tasks" mic stayed armed under `TaskFocusView` and spoken commands would act on the hidden list. Fixed
+  by gating `listeningActive` on being top of the nav stack — `AllTasksView` now takes a `navPath` binding
+  and `.onChange(of: navPath)` re-syncs. Also fixes the pre-existing row-tap and re-entry routes. Verified
+  on the sim: opening a task from Home arms no "tasks" mic; returning to the list re-arms it.
+- Dropped the raw `stopRecording()` in the bulk-delete confirmation-dialog dismissal setter
+  (`BrainDumpSheet`), a second raw-stop-during-dismissal of the bug-4 shape; the destination's
+  `listen(as:)` supersede tears the confirm recording down cleanly.
+
+**Diagnostics (DEBUG only, for device/sim log-grep QA):** `stopListening[<owner>]: current owner is <x>
+— no-op` and `recognition callback superseded … bailing`. Grep `listen[|armed|no-op|superseded`.
+
+**Known residual raw-mic sites (pre-existing, lower-risk, NOT reproductions of the reported bugs):** the
+Brain Dump *capture* one-shot (`startRecording`/`stopAndProcess`/`finalize` — needs a single `finalize`,
+not auto-continue, so it stays raw), the rest of the bulk-confirm loop (`beginBulkConfirmVoice`/
+`armConfirmMic`), and the `SFSpeechRecognizerDelegate` availability handler (`if !available {
+stopRecording() }`, which raw-stops with no coordinator re-arm on an availability blip). Track for a
+future §-completion of §24.
+
+**Tests / verification.** Deterministic gate green (285 tests: NavCommand incl. 13 new Home-routing,
+Tasks-integration, Review, Edit, DestructiveGuard, ListeningBar). Full suite: only the pre-existing,
+flaky `AIFillerRuleEvalTests` / `VoxdumpAIParsingEvalTests` fail (Apple Intelligence is unavailable on
+the simulator, so the rule fallback runs) — no voice/nav/command regressions. Bugs 3 and 4 and the
+Tasks-mic gating verified live on the `VOX_FORCE_VOICE=1` sim; bug 2's stale-callback path can't be
+driven headlessly (needs real speech) so it rests on the device-log evidence + the review.
+
+Files this session: `FocusFlow/SpeechManager.swift`, `FocusFlow/BrainDumpSheet.swift`,
+`FocusFlow/ContentView.swift`, `FocusFlow/AllTasksView.swift`, `FocusFlow/NavCommand.swift`,
+`FocusFlowTests/VoxdumpNavCommandTests.swift`, and this doc + `docs/HANDOFF-voice-lifecycle.md`.
+
+## 28. 2026-07-15 (session 11): task-detail voice + capture "cancel" + reentry voice (round-2 feedback)
+
+Device feedback after §27 surfaced three issues; the first was a regression §27 INTRODUCED by
+over-correcting on a review finding.
+
+**Fixed — voice was dead on the open task (regression from §27).** §27's review correctly flagged that
+the "tasks" mic bled onto the task-detail screen and acted on the hidden list, and gated it off
+(`AllTasksView.isTopOfStack`). But `TaskFocusView` had NO voice of its own, so the detail went silent —
+you could not say "next"/"previous" or "mark first step complete". The correct fix is a detail-scoped
+listener, now added: new pure `FocusCommand` / `FocusCommandMatcher` (`FocusCommand.swift`) and
+`TaskFocusView` wired to the coordinator as owner **"focus"** with a ListeningBar. Commands:
+`next`/`previous` (goToNext/goToPrevious), `complete first/second/… step` and `step N` (toggle a
+micro-step by ordinal; "last" supported), `complete`/`mark complete`/`all done` (whole task),
+`back`/`go to tasks` (return to list). Ordinals here mean STEPS (there is no task list on this screen).
+`AllTasksView`'s DEBUG inject observer is now gated on `listeningActive` so an inject under focus does
+not double-fire on the hidden list. Verified on the sim: `listen[focus]: armed` on the detail;
+"complete first step" checked step 1; "previous" navigated; "go back" dismissed and re-armed
+`listen[tasks]`. New `VoxdumpFocusCommandTests` suite (26 cases).
+
+**Fixed — spoken "cancel" on the create screen stranded you on the big-mic ready view.** The brain-dump
+capture parsed everything, so "cancel" became a failed dump and landed on the non-listening ready
+screen. Added `TranscriptFilter.isAbort` (whole-phrase "cancel"/"never mind"/"go back"/"close"/… so a
+real dump that merely CONTAINS "cancel" is unaffected); `BrainDumpSheet.processTranscript` now dismisses
+on an abort phrase, returning to the always-listening surface. 9 new `TranscriptFilterTests`. The dismiss
+destination (brain dump -> listening Tasks list, `listen[tasks]` re-arms) is sim-verified; the spoken
+path itself needs real speech to reproduce (the sim has no drivable mic — same limit as bug 2).
+
+**Added — voice on the "Welcome back" (reentry) screen.** It was never voice-enabled. It opens when
+there are incomplete tasks AND the app was last active > 1 hour ago (`ContentView.checkReentry` on
+`didBecomeActive`; `lastActiveDate` is written on background in `FocusFlowApp`) — intentional and
+pre-existing, NOT a regression. `ReentryView` now listens as owner **"reentry"** (continue/resume ->
+continue the task; dismiss/go home/no -> close) with a ListeningBar.
+
+**QA lesson (why §27 missed this).** §27 verified the fix I INTENDED ("no mic bleeds onto the list") but
+not the behavior the user actually wanted ("can I drive the task by voice"). Round-2 verification drives
+the real spoken interactions on the sim via `braindump://inject` (now observed by `TaskFocusView` too),
+not just the narrow change.
+
+Files: `FocusFlow/FocusCommand.swift` (new), `FocusFlow/TaskFocusView.swift`, `FocusFlow/AllTasksView.swift`,
+`FocusFlow/TranscriptFilter.swift`, `FocusFlow/BrainDumpSheet.swift`, `FocusFlow/ReentryView.swift`,
+`FocusFlowTests/VoxdumpFocusCommandTests.swift` (new), `FocusFlowTests/TranscriptFilterTests.swift`.

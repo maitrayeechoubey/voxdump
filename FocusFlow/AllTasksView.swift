@@ -8,6 +8,12 @@ struct AllTasksView: View {
     /// Which slice to show on arrival; set by voice navigation from Home ("show pending"). The
     /// segmented control and the showTasks voice command update `filter` from here on.
     var initialFilter: TaskFilter = .all
+    /// The app's navigation stack (owned by ContentView). AllTasksView is the always-on "tasks"
+    /// mic owner ONLY while it is the visible top of the stack. When a task detail is pushed on
+    /// top (via a row tap, Home "open <task>", or re-entry) AllTasksView stays mounted but must
+    /// resign the mic, or the listener stays live under TaskFocusView and spoken commands act on
+    /// the hidden list. (openTaskID covers the separate voice-open path via navigationDestination(item:).)
+    @Binding var navPath: [AppRoute]
     @State private var showBrainDump = false
     @State private var filter: TaskFilter = .all
 
@@ -29,8 +35,11 @@ struct AllTasksView: View {
     private var voiceSupported: Bool { VoiceEnv.supported }
     // Listen only when hands-free is on AND nothing else owns the mic or foreground
     // (a brain dump is capturing, or we pushed into a task detail).
+    // AllTasksView is the top of the stack when nothing is pushed above it; a pushed task detail
+    // makes navPath.last == .taskFocus, and then the "tasks" mic must be off.
+    private var isTopOfStack: Bool { navPath.last == .allTasks }
     private var listeningActive: Bool {
-        voiceSupported && handsFree && !showBrainDump && openTaskID == nil
+        voiceSupported && handsFree && !showBrainDump && openTaskID == nil && isTopOfStack
     }
 
     var body: some View {
@@ -186,6 +195,8 @@ struct AllTasksView: View {
         .onChange(of: handsFree) { _, _ in syncVoice() }
         .onChange(of: showBrainDump) { _, _ in syncVoice() }
         .onChange(of: openTaskID) { _, _ in syncVoice() }
+        // Resign the mic when a task detail is pushed on top of us (navPath grows), re-arm on pop.
+        .onChange(of: navPath) { _, _ in syncVoice() }
         // Arm the mic only AFTER our own speech finishes, so it never hears itself.
         .onChange(of: speaker.isSpeaking) { _, speaking in if !speaking { syncVoice() } }
         // Commands run only on the finalized utterance (speech.onSilenceDetected -> evaluate),
@@ -194,7 +205,9 @@ struct AllTasksView: View {
         #if DEBUG
         // QA seam: drive the real command path with an injected transcript (braindump://inject).
         .onReceive(NotificationCenter.default.publisher(for: .voxDebugInject)) { note in
-            if let text = note.object as? String { evaluate(text) }
+            // Gate on listeningActive so an inject doesn't ALSO fire here when a task detail (focus)
+            // or the brain-dump sheet is on top — otherwise it would act on the hidden list.
+            if listeningActive, let text = note.object as? String { evaluate(text) }
         }
         #endif
     }

@@ -185,4 +185,55 @@ final class VoxdumpNavCommandTests: XCTestCase {
     func test_isBulk_all() { XCTAssertTrue(NavCommandResolver.isBulk(.delete(.all))) }
     func test_isBulk_date() { XCTAssertTrue(NavCommandResolver.isBulk(.complete(.createdOn(.today)))) }
     func test_isBulk_single_false() { XCTAssertFalse(NavCommandResolver.isBulk(.complete(.ordinal(1)))) }
+
+    // MARK: Home routing (bug 3 — a named "open/show <task>" on Home opens THAT task, not the list)
+    // HomeVoiceRouter is the pure decision behind HomeView.evaluate. Before the fix, .open always
+    // routed to .showTasks(.all) ("can't reliably resolve one task from Home"). These assert Home
+    // now resolves the named task against its own list — a resolver-only test would pass even with
+    // the bug present, because the resolver was never the problem; Home ignoring it was.
+
+    private func home(_ text: String, _ titles: [String]) -> HomeVoiceOutcome {
+        // Display order = most-recent first; give descending createdAt so index order is stable.
+        let snap = titles.enumerated().map { i, t in
+            TaskSnapshot(title: t, isCompleted: false, createdAt: Date(timeIntervalSince1970: TimeInterval(10_000 - i)))
+        }
+        return HomeVoiceRouter.outcome(for: text, tasks: snap)
+    }
+
+    func test_home_openNamedTask_opensThatTask() {
+        XCTAssertEqual(home("show call immigration", ["buy groceries", "call immigration", "pay rent"]), .openTask(1))
+    }
+    func test_home_openByName_fuzzy() {
+        XCTAssertEqual(home("open groceries", ["buy groceries", "call mom"]), .openTask(0))
+    }
+    func test_home_openUnresolvedName_fallsBackToList() {
+        // A name we can't confidently match falls back to the full list — never a wrong task.
+        XCTAssertEqual(home("show quantum physics", ["buy groceries", "call mom"]), .showTasks(.all))
+    }
+    func test_home_openWithNoTasks_fallsBackToList() {
+        XCTAssertEqual(home("show call mom", []), .showTasks(.all))
+    }
+    func test_home_openFirstOrdinal_opensMostRecent() {
+        XCTAssertEqual(home("open first", ["newest", "older"]), .openTask(0))
+    }
+    func test_home_showAll_staysList_notOpen() {   // bug 1 must still hold on Home
+        XCTAssertEqual(home("show all tasks", ["a", "b"]), .showTasks(.all))
+    }
+    func test_home_showPending_navigates() {
+        XCTAssertEqual(home("show pending", ["a"]), .showTasks(.pending))
+    }
+    func test_home_newTask_opensCapture() {
+        XCTAssertEqual(home("new task", []), .newDump)
+    }
+    func test_home_mute() { XCTAssertEqual(home("mute", ["a"]), .mute) }
+    func test_home_readTasks() { XCTAssertEqual(home("read my tasks", ["a"]), .readTasks) }
+    func test_home_completeIsIgnoredOnHome() {   // complete/delete/reopen aren't meaningful on Home
+        XCTAssertEqual(home("complete first", ["a", "b"]), .ignore)
+    }
+    func test_home_nonCommandPhrase_isCaptured() {
+        XCTAssertEqual(home("remind me to call the debt collector", []), .capture("remind me to call the debt collector"))
+    }
+    func test_home_oneWordNoise_isIgnored() {
+        XCTAssertEqual(home("uh", []), .ignore)
+    }
 }
