@@ -2,6 +2,21 @@ import Foundation
 import Speech
 import AVFoundation
 
+/// Whether hands-free voice runs in THIS process. On a real device: always. On the SIMULATOR we
+/// default to text mode, but the sim DOES capture the Mac's microphone and SFSpeechRecognizer works
+/// there — so launching with the `VOX_FORCE_VOICE=1` environment variable turns on the real voice
+/// path (mic → recognizer → the always-on arm/re-arm lifecycle) for testing off-device. This closes
+/// the gap that hid the listener-lifecycle regressions. See docs/qa-voice-testing.md.
+enum VoiceEnv {
+    static var supported: Bool {
+        #if targetEnvironment(simulator)
+        return ProcessInfo.processInfo.environment["VOX_FORCE_VOICE"] == "1"
+        #else
+        return true
+        #endif
+    }
+}
+
 @MainActor
 final class SpeechManager: NSObject, ObservableObject {
     // Single process-wide owner of the microphone. The mic and AVAudioSession are

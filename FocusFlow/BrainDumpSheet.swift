@@ -23,20 +23,8 @@ struct BrainDumpSheet: View {
     @StateObject private var speaker = SpeakManager()
     private let synth = AVSpeechSynthesizer()
 
-    @State private var state: DumpState = {
-        #if targetEnvironment(simulator)
-        return .ready
-        #else
-        return .starting
-        #endif
-    }()
-    @State private var textMode: Bool = {
-        #if targetEnvironment(simulator)
-        return true
-        #else
-        return false
-        #endif
-    }()
+    @State private var state: DumpState = VoiceEnv.supported ? .starting : .ready
+    @State private var textMode: Bool = !VoiceEnv.supported
     @State private var manualInput = ""
     @State private var permissionAlert: SpeechError?
     // Bounds the silent retry when the mic is not yet authorized at launch (bug 5).
@@ -120,9 +108,7 @@ struct BrainDumpSheet: View {
             }
             Task { @MainActor in
                 await speech.requestAuthorization()
-                #if !targetEnvironment(simulator)
-                startRecording()
-                #endif
+                if VoiceEnv.supported { startRecording() }
             }
         }
         .alert("Permission Required", isPresented: Binding(

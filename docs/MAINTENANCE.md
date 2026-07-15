@@ -729,3 +729,23 @@ accept -> pending task) and nav still work; Home RECENT shows the new pending ta
 completed ones. The actual on-device arm timing is device-only (the sim forces text mode), but the
 coordinator makes the two-loop race impossible by construction, and routing stays covered by 167 fast
 tests. Files: `FocusFlow/SpeechManager.swift`, `FocusFlow/AllTasksView.swift`, `FocusFlow/ContentView.swift`.
+
+## 25. 2026-07-15 (session 9e): voice testing on the simulator (VOX_FORCE_VOICE)
+
+Correction to the "device-only" claim in prior sections: the iOS Simulator DOES capture the Mac's
+microphone and SFSpeechRecognizer runs on it. The app only forced text mode on the sim by policy
+(`#if targetEnvironment(simulator)`), which is exactly what hid the listener-lifecycle regressions.
+
+Centralized that policy into `VoiceEnv.supported` (SpeechManager.swift): device → true; simulator →
+true only when launched with `VOX_FORCE_VOICE=1`. Default sim behavior (text mode, so the inject/
+scenario flows are unaffected) is preserved; the flag turns on the REAL voice path for lifecycle
+testing. Replaced the five scattered `#if targetEnvironment(simulator)` voice guards
+(AllTasksView, ContentView/HomeView, BrainDumpSheet ×3) with `VoiceEnv.supported`.
+
+Verified the §24 coordinator fix ON THE SIMULATOR this way: launched with VOX_FORCE_VOICE=1 + mic
+granted, navigated Home <-> Tasks, and `xcrun simctl spawn <udid> log show ... | grep listen` showed a
+clean `listen[home]: armed` then `listen[tasks]: armed` (one per navigation) — NOT the old thrash.
+Full how-to in docs/qa-voice-testing.md §4. Automated audio feed still wants a virtual input device
+(BlackHole) or a human speaking into the Mac mic; the lifecycle itself is now verifiable off-device.
+Files: `FocusFlow/SpeechManager.swift`, `FocusFlow/AllTasksView.swift`, `FocusFlow/ContentView.swift`,
+`FocusFlow/BrainDumpSheet.swift`, `docs/qa-voice-testing.md`.

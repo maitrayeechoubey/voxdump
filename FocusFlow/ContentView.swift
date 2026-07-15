@@ -239,13 +239,7 @@ private struct HomeView: View {
 
     // Recent shows the last 3 PENDING tasks only — completed ones don't belong on the landing page.
     private var recent: [TaskItem] { Array(allTasks.filter { !$0.isCompleted }.prefix(3)) }
-    private var voiceSupported: Bool {
-        #if targetEnvironment(simulator)
-        return false
-        #else
-        return true
-        #endif
-    }
+    private var voiceSupported: Bool { VoiceEnv.supported }
     private var listeningActive: Bool { voiceSupported && handsFree && canListen }
 
     var body: some View {

@@ -26,13 +26,7 @@ struct AllTasksView: View {
     private var pending: [TaskItem]   { allTasks.filter { !$0.isCompleted } }
     private var completed: [TaskItem] { allTasks.filter { $0.isCompleted } }
 
-    private var voiceSupported: Bool {
-        #if targetEnvironment(simulator)
-        return false
-        #else
-        return true
-        #endif
-    }
+    private var voiceSupported: Bool { VoiceEnv.supported }
     // Listen only when hands-free is on AND nothing else owns the mic or foreground
     // (a brain dump is capturing, or we pushed into a task detail).
     private var listeningActive: Bool {

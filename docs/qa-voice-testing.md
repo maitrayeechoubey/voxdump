@@ -61,7 +61,34 @@ It writes `workspace/harvested_transcripts.txt` (every real "heard '…' -> acti
 `VoxdumpVoiceScenarioTests` with an expected outcome. Real ASR noise ("Receipt except" for "accept",
 "Mark go" partials) becomes a permanent regression test instead of something you re-test by hand.
 
-## What still needs a device
+## 4. Run the REAL voice path on the simulator (mic + recognizer + arm/re-arm lifecycle)
 
-Only the mic hardware + Apple's on-device ASR (audio → transcript) and Siri launch. The command
-DECISION logic — where every reported bug has been — is fully covered off-device by layers 1–3.
+The simulator DOES capture the Mac's microphone and `SFSpeechRecognizer` runs there. The app defaults
+to text mode on the sim, but launch with `VOX_FORCE_VOICE=1` to turn on the real always-on voice path
+(mic → recognizer → the arm/re-arm coordinator). This is how the LISTENER LIFECYCLE (the part that
+repeatedly regressed) gets verified off-device.
+
+```bash
+UDID=<SIM_UDID>; BUNDLE=com.maitrayeechoubey.braindumpapp
+xcrun simctl privacy $UDID grant microphone $BUNDLE      # speech-recognition is granted at first run
+SIMCTL_CHILD_VOX_FORCE_VOICE=1 xcrun simctl launch --terminate-running-process $UDID $BUNDLE
+# ...navigate Home <-> Tasks..., then read the sim's own log:
+xcrun simctl spawn $UDID log show --last 60s --predicate 'subsystem == "com.braindump"' --info --debug --style compact | grep listen
+```
+
+A HEALTHY log shows one clean arm per surface change:
+```
+listen[home]: armed       # on Home
+listen[tasks]: armed      # after navigating to Tasks
+```
+A BROKEN (thrashing) log interleaves `home`/`tasks` every 1-3s — that's the two-loop race (§24).
+
+Feeding synthesized speech automatically needs a virtual input device (e.g. BlackHole) set as the
+Mac's default input, then `say`/`afplay` into it — the sim reads the Mac's default input. Without one,
+speak into the Mac mic manually, OR use the `braindump://inject` seam (layer 2) which covers routing.
+
+## What still needs a physical device
+
+Apple's on-device ASR QUALITY on real speech/accents/noise (the sim uses the Mac mic) and Siri launch.
+Everything else — command decisions, task selection, the confirm flow, AND the always-on arm/re-arm
+lifecycle — is now verifiable off-device via layers 1–4.
