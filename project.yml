@@ -56,6 +56,12 @@ targets:
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         ITSAppUsesNonExemptEncryption: false
+        # Register the braindump:// scheme so App Intents and the QA inject URL
+        # (braindump://inject?text=… in DEBUG) can route into the app.
+        CFBundleURLTypes:
+          - CFBundleURLName: com.maitrayeechoubey.braindumpapp
+            CFBundleURLSchemes:
+              - braindump
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationPortraitUpsideDown

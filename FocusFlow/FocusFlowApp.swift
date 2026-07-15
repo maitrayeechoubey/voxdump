@@ -24,6 +24,14 @@ struct FocusFlowApp: App {
                     switch url.host {
                     case "tasks":
                         NotificationCenter.default.post(name: .braindumpShowTasks, object: nil)
+                    #if DEBUG
+                    case "inject":
+                        // QA: braindump://inject?text=complete%20all routes a transcript through the
+                        // real command path so the simulator can be driven like a voice device.
+                        let text = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                            .queryItems?.first { $0.name == "text" }?.value ?? ""
+                        if !text.isEmpty { NotificationCenter.default.post(name: .voxDebugInject, object: text) }
+                    #endif
                     default:
                         // "open" or any other host → open mic
                         NotificationCenter.default.post(name: .braindumpOpen, object: nil)

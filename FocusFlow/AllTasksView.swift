@@ -178,7 +178,15 @@ struct AllTasksView: View {
         .onChange(of: openTaskID) { _, _ in syncVoice() }
         // Arm the mic only AFTER our own speech finishes, so it never hears itself.
         .onChange(of: speaker.isSpeaking) { _, speaking in if !speaking { syncVoice() } }
-        .onChange(of: speech.transcript) { _, txt in evaluate(txt, live: true) }
+        // Commands run only on the finalized utterance (speech.onSilenceDetected -> evaluate),
+        // never on live partials — see the note in evaluate(). The ListeningBar shows the live
+        // transcript by observing speech directly, so we no longer route partials here.
+        #if DEBUG
+        // QA seam: drive the real command path with an injected transcript (braindump://inject).
+        .onReceive(NotificationCenter.default.publisher(for: .voxDebugInject)) { note in
+            if let text = note.object as? String { evaluate(text, live: false, injected: true) }
+        }
+        #endif
     }
 
     // MARK: - Voice engine (mirrors CardReviewView's arm/re-arm pattern)
@@ -214,8 +222,17 @@ struct AllTasksView: View {
         speech.stopRecording()
     }
 
-    private func evaluate(_ text: String, live: Bool) {
-        guard voiceActive, !actionInFlight else { return }
+    private func evaluate(_ text: String, live: Bool, injected: Bool = false) {
+        // injected == a QA transcript from the braindump://inject debug URL: run the routing even
+        // when the always-on listener is not armed (e.g. on the simulator, which has no mic).
+        if injected { actionInFlight = false }
+        guard injected || voiceActive, !actionInFlight else { return }
+        // Act ONLY on the finalized utterance (after a short silence), never a live partial.
+        // Partials like "Mark go" (mid "mark go to the gym…") were completing the first "go" task
+        // before the sentence finished — the "too fast" reaction. Live partials now only feed the
+        // on-screen transcript (the ListeningBar observes speech.transcript directly). Injected QA
+        // transcripts are already final.
+        if live && !injected { return }
 
         // While confirming a delete, only a clear spoken yes/no is honored.
         if confirmingDelete {

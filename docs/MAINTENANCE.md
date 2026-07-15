@@ -625,3 +625,31 @@ Files: `FocusFlow/NavCommand.swift`, `FocusFlow/AllTasksView.swift`, `FocusFlow/
 `FocusFlow/SpeechManager.swift`, `FocusFlow/BrainDumpSheet.swift`, `FocusFlow/ListeningBar.swift`,
 `FocusFlowTests/VoxdumpNavCommandTests.swift`, `FocusFlowTests/VoxdumpTasksCommandIntegrationTests.swift`,
 `FocusFlowTests/VoxdumpDestructiveGuardTests.swift`.
+
+## 21. 2026-07-14 (session 9): premature-execution fix + headless voice QA system
+
+**Bug — "reaction time too fast" (completed the wrong task).** Device logs showed pairs like
+`tasks heard 'Mark go' -> complete(name("go"))` then 137ms later `'Mark go to' -> complete(name("go"))`:
+`AllTasksView.evaluate` ran `perform()` on every LIVE partial transcript (`.onChange(of:
+speech.transcript)`), so a partial "Mark go" (mid "mark go to the gym…") completed the first "go"
+task before the sentence finished. Fix: commands act ONLY on the finalized utterance
+(`speech.onSilenceDetected -> evaluate(live: false)`); the live-partial onChange was removed and
+`evaluate` early-returns on any `live` call. The ListeningBar still shows the live transcript (it
+observes `speech` directly). File: `FocusFlow/AllTasksView.swift`.
+
+**Headless voice QA (so voice no longer needs a device every time).** Three layers, documented in
+`docs/qa-voice-testing.md`:
+1. `VoxdumpVoiceScenarioTests.swift` — data-driven "given tasks, say phrase, expect outcome" cases
+   running the real matcher→resolver→SwiftData path. Everyday net; add a case in one line.
+2. DEBUG `braindump://inject?text=…` URL (registered via `CFBundleURLTypes`) routes a transcript
+   through the real command path so `xcrun simctl openurl` drives the app like a voice device with no
+   mic. Wired in `FocusFlowApp.onOpenURL` -> `.voxDebugInject` -> `AllTasksView.evaluate(injected:)`.
+   Verified end-to-end on the simulator: injecting "complete all" moved every task to COMPLETED.
+3. `scripts/harvest_transcripts.py` — turns a device logarchive's real "heard '…' -> action" lines
+   into deduped fixtures + scenario stubs, so occasional device sessions compound into the suite.
+Files: `FocusFlow/AllTasksView.swift`, `FocusFlow/FocusFlowApp.swift`, `FocusFlow/FocusFlowIntents.swift`,
+`FocusFlow/SpeechManager.swift`, `project.yml`, `FocusFlowTests/VoxdumpVoiceScenarioTests.swift`,
+`scripts/harvest_transcripts.py`, `docs/qa-voice-testing.md`.
+
+Open (next): Home/main page should use the shared ListeningBar and be always-listening (currently a
+giant mic), making the note-taking-on-launch experience the consistent default.

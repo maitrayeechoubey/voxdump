@@ -6,6 +6,12 @@ import CoreFoundation
 extension Notification.Name {
     static let braindumpOpen = Notification.Name("com.braindump.open")
     static let braindumpShowTasks = Notification.Name("com.braindump.showTasks")
+    #if DEBUG
+    // QA seam: carries a transcript String to route as if the recognizer produced it, so the
+    // simulator (which has no usable mic) can be driven like a voice device. Posted by the
+    // braindump://inject?text=… debug URL; observed by AllTasksView. See docs/qa-voice-testing.md.
+    static let voxDebugInject = Notification.Name("com.braindump.debug.inject")
+    #endif
 }
 
 // MARK: - Darwin cross-process notifications
