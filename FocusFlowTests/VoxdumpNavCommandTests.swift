@@ -20,6 +20,31 @@ final class VoxdumpNavCommandTests: XCTestCase {
     func test_new_createNewTask_realLog() { XCTAssertEqual(m("Create a new task"), .newDump) }
     func test_new_addNewTask_realLog() { XCTAssertEqual(m("Add a new task"), .newDump) }
     func test_new_anotherTask() { XCTAssertEqual(m("add another task"), .newDump) }
+    // Home-hero starter phrases must open capture, not be captured as a task titled "create a task".
+    func test_new_createATask() { XCTAssertEqual(m("create a task"), .newDump) }
+    func test_new_addAToDo_hyphen() { XCTAssertEqual(m("add a to-do"), .newDump) }
+    func test_new_addAToDo_spaced() { XCTAssertEqual(m("add a to do"), .newDump) }
+    func test_new_addATodo_oneWord() { XCTAssertEqual(m("add a todo"), .newDump) }
+    func test_new_makeATask() { XCTAssertEqual(m("make a task"), .newDump) }
+    func test_new_createANote() { XCTAssertEqual(m("create a note"), .newDump) }
+    // Home-hero navigation hint phrases.
+    func test_nav_showAllPendingTasks() { XCTAssertEqual(m("show all pending tasks"), .showTasks(.pending)) }
+    func test_nav_showAllTasks() { XCTAssertEqual(m("show all tasks"), .showTasks(.all)) }
+
+    // Regression guard for the Home hero: every phrase we ADVERTISE as a chip (HomeHints) must
+    // resolve through the real Home router to the action we claim. If someone edits the on-screen
+    // copy to something the matcher doesn't understand, this fails instead of shipping a dead hint.
+    func test_homeHints_everyAdvertisedPhraseResolvesToItsClaimedAction() {
+        for hint in HomeHints.all {
+            let expected: HomeVoiceOutcome
+            switch hint.action {
+            case .capture:     expected = .newDump
+            case .show(let f): expected = .showTasks(f)
+            }
+            XCTAssertEqual(home(hint.phrase, ["call the plumber", "buy milk"]), expected,
+                           "Home hint \u{201C}\(hint.phrase)\u{201D} should resolve to \(expected)")
+        }
+    }
     func test_read_list() { XCTAssertEqual(m("read my tasks"), .readTasks) }
     func test_mute() { XCTAssertEqual(m("mute"), .mute) }
     func test_mute_stopListening() { XCTAssertEqual(m("stop listening"), .mute) }

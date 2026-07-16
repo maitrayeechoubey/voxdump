@@ -62,9 +62,15 @@ enum NavCommandMatcher {
             || (has(["back"]) && words.count <= 2) { return .goBack }
 
         // New brain dump / add a task (routes to the existing capture flow, which uses the LLM).
-        if phrase(["new task", "add a task", "add task", "new dump", "brain dump", "braindump",
-                   "add to my list", "new note", "start a dump", "capture a", "capture something",
-                   "another task", "one more task"])
+        // The Home hero surfaces "add a to-do" / "create a task" as the primary spoken starters, so
+        // those exact phrases (and their hyphen/space/"todo" variants) must land here, not get
+        // mis-captured as a task literally titled "create a task".
+        if phrase(["new task", "add a task", "add task", "create a task", "create task",
+                   "make a task", "add a to-do", "add a to do", "add a todo", "add to-do", "add todo",
+                   "create a to-do", "create a to do", "create a todo", "make a to-do", "make a to do",
+                   "new dump", "brain dump", "braindump", "add to my list", "new note",
+                   "start a dump", "capture a", "capture something", "another task", "one more task"])
+            || (has(["create", "make"]) && has(["task", "tasks", "note", "todo", "reminder"]))
             || has(["dump"]) || (has(["capture"]) && !has(["task", "tasks"])) { return .newDump }
 
         // Read the list aloud.

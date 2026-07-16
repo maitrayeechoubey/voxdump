@@ -219,6 +219,86 @@ struct ContentView: View {
 
 // MARK: - Home screen
 
+// MARK: - Home hero hints (data-driven so tests can verify every advertised phrase resolves)
+
+/// A tappable hint shown on the Home hero. Each is also a real spoken command:
+/// `VoxdumpNavCommandTests` asserts every `phrase` resolves through `HomeVoiceRouter` to its
+/// `action`, so the on-screen copy can never silently drift from what the voice matcher understands.
+/// Primary hints (task creation, the app's main job) render filled + icon'd; navigation hints render
+/// as lighter outline pills.
+struct HomeHint: Identifiable, Equatable {
+    enum Action: Equatable { case capture; case show(TaskFilter) }
+    let icon: String?
+    let phrase: String
+    let isPrimary: Bool
+    let action: Action
+    var id: String { phrase }
+}
+
+enum HomeHints {
+    static let all: [HomeHint] = [
+        HomeHint(icon: "plus.circle.fill", phrase: "add a to-do",            isPrimary: true,  action: .capture),
+        HomeHint(icon: "checklist",        phrase: "create a task",          isPrimary: true,  action: .capture),
+        HomeHint(icon: nil,                phrase: "show all pending tasks", isPrimary: false, action: .show(.pending)),
+        HomeHint(icon: nil,                phrase: "show all tasks",         isPrimary: false, action: .show(.all)),
+    ]
+}
+
+/// Minimal wrapping layout that centers each row. Used for the Home hero hint chips so they flow
+/// onto new lines (and stay centered) rather than overflowing when the phrases are wide. iOS 16+.
+private struct CenteredFlowLayout: Layout {
+    var spacing: CGFloat = 10
+    var rowSpacing: CGFloat = 10
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let maxWidth = proposal.width ?? .greatestFiniteMagnitude
+        let sizes = subviews.map { $0.sizeThatFits(.unspecified) }
+        var rowWidth: CGFloat = 0, rowHeight: CGFloat = 0, totalHeight: CGFloat = 0, maxRowWidth: CGFloat = 0
+        for size in sizes {
+            if rowWidth > 0 && rowWidth + spacing + size.width > maxWidth {
+                totalHeight += rowHeight + rowSpacing
+                maxRowWidth = max(maxRowWidth, rowWidth)
+                rowWidth = size.width; rowHeight = size.height
+            } else {
+                rowWidth = rowWidth == 0 ? size.width : rowWidth + spacing + size.width
+                rowHeight = max(rowHeight, size.height)
+            }
+        }
+        totalHeight += rowHeight
+        maxRowWidth = max(maxRowWidth, rowWidth)
+        return CGSize(width: proposal.width ?? maxRowWidth, height: totalHeight)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let maxWidth = bounds.width
+        let sizes = subviews.map { $0.sizeThatFits(.unspecified) }
+        var rows: [[Int]] = [], current: [Int] = [], rowWidth: CGFloat = 0
+        for i in subviews.indices {
+            let w = sizes[i].width
+            if !current.isEmpty && rowWidth + spacing + w > maxWidth {
+                rows.append(current); current = [i]; rowWidth = w
+            } else {
+                current.append(i); rowWidth = current.count == 1 ? w : rowWidth + spacing + w
+            }
+        }
+        if !current.isEmpty { rows.append(current) }
+
+        var y = bounds.minY
+        for row in rows {
+            let rowW = row.reduce(CGFloat(0)) { $0 + sizes[$1].width } + spacing * CGFloat(max(0, row.count - 1))
+            let rowH = row.map { sizes[$0].height }.max() ?? 0
+            var x = bounds.minX + max(0, (maxWidth - rowW) / 2)
+            for i in row {
+                let s = sizes[i]
+                subviews[i].place(at: CGPoint(x: x, y: y + (rowH - s.height) / 2),
+                                  anchor: .topLeading, proposal: ProposedViewSize(width: s.width, height: s.height))
+                x += s.width + spacing
+            }
+            y += rowH + rowSpacing
+        }
+    }
+}
+
 private struct HomeView: View {
     let onMicTap: () -> Void
     let onMenuTap: () -> Void
@@ -235,7 +315,6 @@ private struct HomeView: View {
     @StateObject private var speaker = SpeakManager()
     @State private var handsFree = true
     @State private var pulse: CGFloat = 1.0
-    @State private var glowOpacity: CGFloat = 0.4
 
     // Recent shows the last 3 PENDING tasks only — completed ones don't belong on the landing page.
     private var recent: [TaskItem] { Array(allTasks.filter { !$0.isCompleted }.prefix(3)) }
@@ -270,45 +349,15 @@ private struct HomeView: View {
 
                 Spacer()
 
-                VStack(spacing: 12) {
-                    Text("Voxdump")
-                        .font(.bdTitle()).foregroundStyle(.white)
-                    Text("Open, speak, done.")
-                        .font(.bdBody()).foregroundStyle(Color.bdMuted)
-                }
+                Text("Voxdump")
+                    .font(.bdTitle()).foregroundStyle(.white)
 
-                Spacer().frame(height: 36)
+                Spacer().frame(height: 28)
 
-                // Tap-to-capture hero (kept). Voice always-on runs in the background; this stays as
-                // the primary tap affordance.
-                ZStack {
-                    Circle()
-                        .fill(Color.bdPrimary.opacity(0.06))
-                        .frame(width: 220, height: 220)
-                        .scaleEffect(pulse)
-                        .animation(.easeInOut(duration: 2.2).repeatForever(autoreverses: true), value: pulse)
-                    Circle()
-                        .fill(Color.bdPrimary.opacity(0.10))
-                        .frame(width: 168, height: 168)
-                    Button(action: onMicTap) {
-                        ZStack {
-                            Circle()
-                                .fill(Color.bdPrimary)
-                                .frame(width: 130, height: 130)
-                                .shadow(color: Color.bdPrimary.opacity(glowOpacity), radius: 32, x: 0, y: 0)
-                                .shadow(color: Color.bdPrimary.opacity(0.25), radius: 16, x: 0, y: 8)
-                            Image(systemName: "mic.fill")
-                                .font(.system(size: 48, weight: .medium))
-                                .foregroundStyle(.white)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                }
-                .onAppear {
-                    pulse = 1.09
-                    glowOpacity = 0.65
-                    onFirstAppear()
-                }
+                // The listening indicator IS the hero now (the old giant mic was removed — voice is
+                // always-on, so a tap-only mic was redundant). It shows live listening state and
+                // teaches the primary action: say a to-do. See `listeningHero`.
+                listeningHero
 
                 if !recent.isEmpty { recentSection }
 
@@ -316,18 +365,9 @@ private struct HomeView: View {
             }
         }
         .navigationBarHidden(true)
-        // Consistent bottom listening bar (same as the Tasks list). Always-on on device; the record
-        // mic is always tappable, even when muted.
-        .safeAreaInset(edge: .bottom) {
-            ListeningBar(
-                speech: speech,
-                voiceEnabled: voiceSupported,
-                isListening: listeningActive,
-                hint: "\u{201C}show my tasks\u{201D}, \u{201C}show pending\u{201D}, \u{201C}new task\u{201D}",
-                handsFree: $handsFree,
-                onNewDump: onMicTap
-            )
-        }
+        // NOTE: Home does NOT use the shared bottom ListeningBar — the enlarged `listeningHero`
+        // above is its listening indicator. The other screens (Tasks, TaskFocus, Reentry, BrainDump)
+        // keep the compact bottom bar unchanged.
         .onAppear { syncVoice() }
         .onDisappear { speech.stopListening(as: "home") }
         .onChange(of: canListen) { _, _ in syncVoice() }
@@ -364,6 +404,140 @@ private struct HomeView: View {
             }
         }
         .padding(.horizontal, 24).padding(.top, 28)
+    }
+
+    // MARK: - Listening hero (Home only)
+
+    /// The enlarged listening indicator that replaced the giant mic. Always-on voice runs in the
+    /// background; this card makes that visible (live transcript + status), leads with the PRIMARY
+    /// function (turn speech into to-dos), and offers two rich, tappable starter hints. Tapping a
+    /// hint (or anywhere the mic would have been) still opens capture, so the tap path survives.
+    private var listeningHero: some View {
+        let hearing = voiceSupported && listeningActive && speech.isRecording
+        let muted = voiceSupported && !handsFree
+        let live = speech.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        let showTranscript = hearing && !live.isEmpty
+        // Mute visibility follows the same tested rule as the shared bar (ListeningBarControls).
+        let controls = ListeningBarControls.resolve(voiceEnabled: voiceSupported, muted: muted,
+                                                     hasMuteToggle: true, hasRecordAction: true)
+
+        return VStack(spacing: 18) {
+            ZStack {
+                Circle()
+                    .fill(Color.bdPrimary.opacity(0.06))
+                    .frame(width: 132, height: 132)
+                    .scaleEffect(pulse)
+                    .animation(.easeInOut(duration: 2.2).repeatForever(autoreverses: true), value: pulse)
+                Circle()
+                    .fill((muted ? Color.bdMuted2 : (hearing ? Color.bdGreen : Color.bdPrimary)).opacity(0.14))
+                    .frame(width: 96, height: 96)
+                Image(systemName: muted ? "mic.slash.fill" : (hearing ? "waveform" : "mic.fill"))
+                    .font(.system(size: 34, weight: .bold))
+                    .foregroundStyle(muted ? Color.bdMuted : (hearing ? Color.bdGreen : Color.bdPrimary))
+                    .symbolEffect(.variableColor.iterative, isActive: hearing)
+                    .contentTransition(.symbolEffect(.replace))
+            }
+
+            VStack(spacing: 6) {
+                Text(heroTopLine(muted: muted, showTranscript: showTranscript, transcript: live))
+                    .font(.bdHeadline())
+                    .foregroundStyle(showTranscript ? .white : (muted ? Color.bdMuted2 : (voiceSupported ? Color.bdGreen : .white)))
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .animation(.easeOut(duration: 0.15), value: showTranscript)
+                Text("Just say what's on your mind and I'll turn it into to-dos.")
+                    .font(.bdBody())
+                    .foregroundStyle(Color.bdMuted)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.horizontal, 8)
+
+            // Tappable hints: primary (creation) first, then navigation. Each is ALSO a real spoken
+            // command (see HomeHints + VoxdumpNavCommandTests), so users can just say them without
+            // tapping. They wrap and stay centered via CenteredFlowLayout.
+            CenteredFlowLayout(spacing: 10, rowSpacing: 10) {
+                ForEach(HomeHints.all) { hint in
+                    heroChip(hint) { perform(hint.action) }
+                }
+            }
+            .padding(.horizontal, 4)
+
+            if controls.showMute {
+                Button {
+                    handsFree.toggle()
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                } label: {
+                    Label(handsFree ? "Listening — tap to mute" : "Muted — tap to listen",
+                          systemImage: handsFree ? "mic.fill" : "mic.slash.fill")
+                        .font(.bdCaption())
+                        .foregroundStyle(handsFree ? Color.bdMuted : Color.bdMuted2)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(handsFree ? "Mute voice" : "Unmute voice")
+            }
+        }
+        .padding(.vertical, 24)
+        .padding(.horizontal, 20)
+        .frame(maxWidth: .infinity)
+        .background(
+            RoundedRectangle(cornerRadius: 26, style: .continuous)
+                .fill(Color.bdCard)
+                .overlay(RoundedRectangle(cornerRadius: 26, style: .continuous)
+                    .stroke(hearing ? Color.bdGreen.opacity(0.5) : Color.bdBorder, lineWidth: 1))
+        )
+        .padding(.horizontal, 24)
+        .onAppear {
+            pulse = 1.08
+            onFirstAppear()
+        }
+    }
+
+    private func heroTopLine(muted: Bool, showTranscript: Bool, transcript: String) -> String {
+        if showTranscript { return "\u{201C}\(transcript)\u{201D}" }
+        if !voiceSupported { return "Tap to add a to-do" }
+        if muted { return "Muted" }
+        return "Listening…"
+    }
+
+    private func perform(_ action: HomeHint.Action) {
+        switch action {
+        case .capture:     onMicTap()
+        case .show(let f): onShowTasks(f)
+        }
+    }
+
+    /// One hint chip. Primary (creation) chips are filled + icon'd; navigation chips are lighter
+    /// outline pills. The phrase is shown quoted because it is literally what you can say.
+    private func heroChip(_ hint: HomeHint, action: @escaping () -> Void) -> some View {
+        Button {
+            action()
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        } label: {
+            HStack(spacing: 7) {
+                if let icon = hint.icon {
+                    Image(systemName: icon).font(.system(size: 13, weight: .bold))
+                }
+                Text("\u{201C}\(hint.phrase)\u{201D}").font(.bdCaption())
+            }
+            .foregroundStyle(hint.isPrimary ? Color.white : Color.bdMuted)
+            .padding(.vertical, hint.isPrimary ? 10 : 8)
+            .padding(.horizontal, hint.isPrimary ? 14 : 13)
+            .background(heroChipBackground(isPrimary: hint.isPrimary))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(hint.isPrimary ? "Start a task. Say or tap \(hint.phrase)" : "Say or tap \(hint.phrase)")
+    }
+
+    @ViewBuilder
+    private func heroChipBackground(isPrimary: Bool) -> some View {
+        if isPrimary {
+            Capsule().fill(Color.bdPrimary.opacity(0.18))
+                .overlay(Capsule().stroke(Color.bdPrimary.opacity(0.45), lineWidth: 1))
+        } else {
+            Capsule().fill(Color.bdCard2)
+                .overlay(Capsule().stroke(Color.bdBorder, lineWidth: 1))
+        }
     }
 
     // MARK: - Voice engine (single-owner coordinator in SpeechManager — no per-view arm loop)
