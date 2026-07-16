@@ -87,22 +87,14 @@ final class SpeechManager: NSObject, ObservableObject {
         // Tasks-list listener) can record once permission was granted anywhere in the app.
         // Without this, micGranted stayed false on every instance except the one that
         // called requestAuthorization(), so those mics failed with micNotAuthorized.
-        if #available(iOS 17.0, *) {
-            micGranted = AVAudioApplication.shared.recordPermission == .granted
-        }
+        micGranted = AVAudioApplication.shared.recordPermission == .granted
     }
 
     func requestAuthorization() async {
         authStatus = await withCheckedContinuation { cont in
             SFSpeechRecognizer.requestAuthorization { cont.resume(returning: $0) }
         }
-        if #available(iOS 17, *) {
-            micGranted = await AVAudioApplication.requestRecordPermission()
-        } else {
-            micGranted = await withCheckedContinuation { cont in
-                AVAudioSession.sharedInstance().requestRecordPermission { cont.resume(returning: $0) }
-            }
-        }
+        micGranted = await AVAudioApplication.requestRecordPermission()
     }
 
     func startRecording() throws {
@@ -111,10 +103,7 @@ final class SpeechManager: NSObject, ObservableObject {
         // micGranted not re-published), and the always-on listener re-arms on a timer — treating
         // that transient state as a denial was reprompting for permissions the user already
         // granted (bug 5). Distinguish real denial from "not ready yet".
-        let micDenied: Bool = {
-            if #available(iOS 17.0, *) { return AVAudioApplication.shared.recordPermission == .denied }
-            return AVAudioSession.sharedInstance().recordPermission == .denied
-        }()
+        let micDenied = AVAudioApplication.shared.recordPermission == .denied
         if authStatus == .denied || authStatus == .restricted { throw SpeechError.notAuthorized }
         if micDenied { throw SpeechError.micNotAuthorized }
         guard let recognizer else { throw SpeechError.unavailable }
